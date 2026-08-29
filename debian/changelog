@@ -1,4 +1,4 @@
-aufs-ng (0~git20260807.842ab15-1mos1) unstable; urgency=medium
+aufs-ng (0~git20260807.842ab15-1minios1) unstable; urgency=medium
 
   * Initial MiniOS DKMS package.
   * Backport aufs-ng to Linux 6.12 while retaining support for newer kernels.
