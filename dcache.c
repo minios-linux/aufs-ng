@@ -289,6 +289,8 @@ static int aufsng_d_revalidate(struct inode *dir, const struct qstr *name,
 	return aufsng_positive_valid(dir, name, dentry, flags);
 }
 
+AUFSNG_D_REVALIDATE_COMPAT(aufsng_d_revalidate)
+
 const struct dentry_operations aufsng_dentry_operations = {
-	.d_revalidate		= aufsng_d_revalidate,
+	.d_revalidate		= AUFSNG_D_REVALIDATE_FN(aufsng_d_revalidate),
 };

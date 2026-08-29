@@ -60,7 +60,7 @@ static int aufsng_create_marker(struct aufsng_fs *pfs, struct dentry *upperdir,
 		end_dirop(slot);
 		return 0;	/* already marked */
 	}
-	err = vfs_create(idmap, slot, S_IFREG | AUFSNG_WH_MODE, NULL);
+	err = aufsng_vfs_create(idmap, slot, S_IFREG | AUFSNG_WH_MODE);
 	end_dirop(slot);
 	return err;
 }
@@ -153,7 +153,7 @@ static int aufsng_do_remove_object(struct aufsng_fs *pfs,
 	if (is_dir) {
 		err = aufsng_clear_whiteouts(pfs, slot);
 		if (!err)
-			err = vfs_rmdir(idmap, d_inode(upperdir), slot, NULL);
+			err = aufsng_vfs_rmdir(idmap, d_inode(upperdir), slot);
 	} else {
 		err = vfs_unlink(idmap, d_inode(upperdir), slot, NULL);
 	}
@@ -195,13 +195,11 @@ static int aufsng_branch_rename(struct aufsng_fs *pfs,
 	struct qstr dstq = QSTR_LEN(dst->name, dst->len);
 	int err;
 
-	rd.mnt_idmap = mnt_idmap(aufsng_upper_mnt(pfs));
-	rd.old_parent = src_parent;
-	rd.new_parent = dst_parent;
-	err = start_renaming(&rd, 0, &srcq, &dstq);
+	err = aufsng_start_renaming(&rd, mnt_idmap(aufsng_upper_mnt(pfs)),
+				    src_parent, dst_parent, 0, &srcq, &dstq);
 	if (!err) {
 		err = vfs_rename(&rd);
-		end_renaming(&rd);
+		aufsng_end_renaming(&rd, src_parent, dst_parent);
 	}
 	return err;
 }
@@ -356,10 +354,10 @@ static int aufsng_create_object(struct dentry *dentry,
 
 	switch (a->mode & S_IFMT) {
 	case S_IFREG:
-		err = vfs_create(idmap, slot, a->mode, NULL);
+		err = aufsng_vfs_create(idmap, slot, a->mode);
 		break;
 	case S_IFDIR:
-		made = vfs_mkdir(idmap, d_inode(pupper), slot, a->mode, NULL);
+		made = aufsng_vfs_mkdir(idmap, d_inode(pupper), slot, a->mode);
 		if (IS_ERR(made)) {
 			/* vfs_mkdir consumed the dentry and the lock */
 			err = PTR_ERR(made);
@@ -369,12 +367,11 @@ static int aufsng_create_object(struct dentry *dentry,
 		err = 0;
 		break;
 	case S_IFLNK:
-		err = vfs_symlink(idmap, d_inode(pupper), slot, a->link,
-				  NULL);
+		err = aufsng_vfs_symlink(idmap, d_inode(pupper), slot, a->link);
 		break;
 	default:
-		err = vfs_mknod(idmap, d_inode(pupper), slot, a->mode,
-				a->rdev, NULL);
+		err = aufsng_vfs_mknod(idmap, d_inode(pupper), slot, a->mode,
+				       a->rdev);
 		break;
 	}
 	if (err) {
@@ -891,9 +888,6 @@ int aufsng_rename(struct mnt_idmap *idmap, struct inode *olddir,
 		}
 	}
 
-	rd.mnt_idmap = upper_idmap;
-	rd.old_parent = oldupperdir;
-	rd.new_parent = newupperdir;
 	rd.flags = flags;
 	{
 		struct qstr oldq = QSTR_LEN(old->d_name.name,
@@ -901,12 +895,13 @@ int aufsng_rename(struct mnt_idmap *idmap, struct inode *olddir,
 		struct qstr newq = QSTR_LEN(new->d_name.name,
 					    new->d_name.len);
 
-		err = start_renaming(&rd, 0, &oldq, &newq);
+		err = aufsng_start_renaming(&rd, upper_idmap, oldupperdir,
+					    newupperdir, 0, &oldq, &newq);
 	}
 	if (!err) {
 		had_victim = d_is_positive(rd.new_dentry);
 		err = vfs_rename(&rd);
-		end_renaming(&rd);
+		aufsng_end_renaming(&rd, oldupperdir, newupperdir);
 	}
 	if (err)
 		goto out_unpark;

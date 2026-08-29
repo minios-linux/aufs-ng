@@ -145,8 +145,10 @@ Also, some `aufs` features are intentionally out of scope:
 
 ## Building
 
-Needs a **64-bit** kernel: inode numbers carry the layer a file came
-from in their high bits, which a 32-bit inode number cannot hold.
+Needs a **64-bit Linux 6.12 or later** kernel: inode numbers carry the
+layer a file came from in their high bits, which a 32-bit inode number
+cannot hold. Kernel API differences from 6.12 onward are isolated in
+`compat.h` so the filesystem code stays version-independent.
 
 Best built **into the kernel** (`CONFIG_AUFSNG_FS=y`) as a live-boot
 sequence typically needs this filesystem type mounted before any

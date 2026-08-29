@@ -1,0 +1,25 @@
+Source: aufs-ng
+Section: kernel
+Priority: optional
+Maintainer: crims0n <crims0n@minios.dev>
+Build-Depends: debhelper-compat (= 13), dh-sequence-dkms
+Standards-Version: 4.7.2
+Homepage: https://github.com/fulalas/aufs-ng
+Vcs-Browser: https://github.com/minios-linux/aufs-ng
+Vcs-Git: https://github.com/minios-linux/aufs-ng.git
+Rules-Requires-Root: no
+Testsuite: autopkgtest-pkg-dkms
+
+Package: aufs-ng-dkms
+Architecture: all
+Depends: dkms (>= 3.0.11), ${misc:Depends}
+Description: standalone AUFS-compatible union filesystem in DKMS format
+ aufs-ng is a small, standalone union filesystem intended as a drop-in
+ kernel-side replacement for AUFS, primarily for live Linux systems. It uses
+ stock exported kernel APIs and does not require patching the kernel.
+ .
+ This package provides aufs-ng as a DKMS module. The resulting module is named
+ aufs-ng.ko, while the filesystem type registered with the kernel remains
+ "aufs", preserving compatibility with existing AUFS mount commands.
+ .
+ Linux 6.12 or later, a 64-bit kernel, and CONFIG_FS_STACK are required.

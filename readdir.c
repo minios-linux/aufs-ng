@@ -24,7 +24,6 @@
 #include <linux/refcount.h>
 #include <linux/iversion.h>
 #include <linux/rcupdate.h>
-#include <linux/fs_dirent.h>
 #include "aufsng.h"
 
 struct aufsng_cache_entry {
@@ -344,7 +343,7 @@ static int aufsng_dir_read_layer(struct aufsng_fs *pfs, const struct path *realp
 {
 	struct aufsng_readdir_data rdd = {
 		.dd.ctx.actor = aufsng_fill_merge,
-		.dd.ctx.count = INT_MAX,
+		AUFSNG_DIR_CONTEXT_COUNT(dd.ctx)
 		.cache = cache,
 		.idx = idx,
 	};
@@ -768,7 +767,7 @@ int aufsng_clear_whiteouts(struct aufsng_fs *pfs, struct dentry *upperdir)
 	struct mnt_idmap *idmap = mnt_idmap(aufsng_upper_mnt(pfs));
 	struct aufsng_wh_sweep sw = {
 		.dd.ctx.actor = aufsng_wh_sweep_actor,
-		.dd.ctx.count = INT_MAX,
+		AUFSNG_DIR_CONTEXT_COUNT(dd.ctx)
 	};
 	struct aufsng_wh_sweep_name *p, *n;
 	struct path realpath = {
@@ -811,9 +810,7 @@ int aufsng_clear_whiteouts(struct aufsng_fs *pfs, struct dentry *upperdir)
 				 * dir; sweep them too.
 				 */
 				if (d_is_dir(whd))
-					e = vfs_rmdir(idmap,
-						      d_inode(upperdir),
-						      whd, NULL);
+					e = aufsng_vfs_rmdir(idmap, d_inode(upperdir), whd);
 				else
 					e = vfs_unlink(idmap,
 						       d_inode(upperdir),

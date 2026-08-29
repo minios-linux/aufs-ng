@@ -25,7 +25,7 @@ static int aufsng_getattr(struct mnt_idmap *idmap, const struct path *path,
 
 	aufsng_path_real(inode, &realpath);
 	old_cred = override_creds(pfs->creator_cred);
-	err = vfs_getattr(&realpath, stat, request_mask, flags);
+	err = aufsng_vfs_getattr(&realpath, stat, request_mask, flags);
 	revert_creds(old_cred);
 	if (err)
 		return err;
@@ -236,10 +236,12 @@ const struct xattr_handler * const aufsng_xattr_handlers[] = {
 	NULL,
 };
 
+AUFSNG_MKDIR_COMPAT(aufsng_mkdir)
+
 const struct inode_operations aufsng_dir_inode_operations = {
 	.lookup		= aufsng_lookup,
 	.create		= aufsng_create,
-	.mkdir		= aufsng_mkdir,
+	.mkdir		= AUFSNG_MKDIR_FN(aufsng_mkdir),
 	.mknod		= aufsng_mknod,
 	.symlink	= aufsng_symlink,
 	.link		= aufsng_link,

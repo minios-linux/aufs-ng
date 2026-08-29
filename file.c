@@ -23,16 +23,19 @@ static void aufsng_file_accessed(struct file *file)
 		inode_set_atime_to_ts(inode, inode_get_atime(real));
 }
 
-static void aufsng_file_end_write(struct kiocb *iocb, ssize_t ret)
+static void aufsng_file_end_write(AUFSNG_END_WRITE_ARGS)
 {
-	struct inode *inode = file_inode(iocb->ki_filp);
+	struct inode *inode = file_inode(AUFSNG_END_WRITE_FILE);
 
 	aufsng_copyattr(inode);
 }
 
-static struct backing_file_ctx *aufsng_backing_ctx(struct super_block *sb)
+static struct backing_file_ctx aufsng_backing_ctx(struct file *file)
 {
-	return &AUFSNG_FS(sb)->backing_ctx;
+	struct backing_file_ctx ctx = AUFSNG_FS(file_inode(file)->i_sb)->backing_ctx;
+
+	aufsng_backing_ctx_set_user_file(&ctx, file);
+	return ctx;
 }
 
 static int aufsng_open(struct inode *inode, struct file *file)
@@ -50,8 +53,8 @@ static int aufsng_open(struct inode *inode, struct file *file)
 	}
 
 	aufsng_path_real(inode, &realpath);
-	realfile = backing_file_open(file, file->f_flags, &realpath,
-				     pfs->creator_cred);
+	realfile = aufsng_backing_file_open(file, file->f_flags, &realpath,
+					    pfs->creator_cred);
 	if (IS_ERR(realfile))
 		return PTR_ERR(realfile);
 
@@ -96,10 +99,10 @@ static loff_t aufsng_llseek(struct file *file, loff_t offset, int whence)
 static ssize_t aufsng_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 {
 	struct file *file = iocb->ki_filp;
+	struct backing_file_ctx ctx = aufsng_backing_ctx(file);
 
 	return backing_file_read_iter(file->private_data, iter, iocb,
-				      iocb->ki_flags,
-				      aufsng_backing_ctx(file_inode(file)->i_sb));
+				      iocb->ki_flags, &ctx);
 }
 
 static ssize_t aufsng_write_iter(struct kiocb *iocb, struct iov_iter *iter)
@@ -117,9 +120,12 @@ static ssize_t aufsng_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 	 * its i_rwsem (as ovl_write_iter).
 	 */
 	inode_lock(inode);
-	ret = backing_file_write_iter(file->private_data, iter, iocb,
-				      iocb->ki_flags,
-				      aufsng_backing_ctx(inode->i_sb));
+	{
+		struct backing_file_ctx ctx = aufsng_backing_ctx(file);
+
+		ret = backing_file_write_iter(file->private_data, iter, iocb,
+					      iocb->ki_flags, &ctx);
+	}
 	inode_unlock(inode);
 
 	return ret;
@@ -134,9 +140,12 @@ static ssize_t aufsng_splice_read(struct file *in, loff_t *ppos,
 
 	init_sync_kiocb(&iocb, in);
 	iocb.ki_pos = *ppos;
-	ret = backing_file_splice_read(in->private_data, &iocb, pipe, len,
-				       flags,
-				       aufsng_backing_ctx(file_inode(in)->i_sb));
+	{
+		struct backing_file_ctx ctx = aufsng_backing_ctx(in);
+
+		ret = aufsng_backing_file_splice_read(in->private_data, &iocb,
+						     pipe, len, flags, &ctx);
+	}
 	*ppos = iocb.ki_pos;
 
 	return ret;
@@ -153,9 +162,12 @@ static ssize_t aufsng_splice_write(struct pipe_inode_info *pipe, struct file *ou
 	inode_lock(inode);
 	init_sync_kiocb(&iocb, out);
 	iocb.ki_pos = *ppos;
-	ret = backing_file_splice_write(pipe, out->private_data, &iocb, len,
-					flags,
-					aufsng_backing_ctx(inode->i_sb));
+	{
+		struct backing_file_ctx ctx = aufsng_backing_ctx(out);
+
+		ret = aufsng_backing_file_splice_write(pipe, out->private_data,
+						      &iocb, len, flags, &ctx);
+	}
 	*ppos = iocb.ki_pos;
 	inode_unlock(inode);
 
@@ -164,8 +176,9 @@ static ssize_t aufsng_splice_write(struct pipe_inode_info *pipe, struct file *ou
 
 static int aufsng_mmap(struct file *file, struct vm_area_struct *vma)
 {
-	return backing_file_mmap(file->private_data, vma,
-				 aufsng_backing_ctx(file_inode(file)->i_sb));
+	struct backing_file_ctx ctx = aufsng_backing_ctx(file);
+
+	return backing_file_mmap(file->private_data, vma, &ctx);
 }
 
 static int aufsng_fsync(struct file *file, loff_t start, loff_t end,

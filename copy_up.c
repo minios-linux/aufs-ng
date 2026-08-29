@@ -266,7 +266,7 @@ static struct dentry *aufsng_copy_up_prep_regular(struct aufsng_fs *pfs,
 			goto out_drop;
 		}
 	}
-	err = vfs_create(idmap, work, S_IFREG | 0600, NULL);
+	err = aufsng_vfs_create(idmap, work, S_IFREG | 0600);
 	if (err) {
 		end_dirop(work);
 		work = ERR_PTR(err);
@@ -331,10 +331,9 @@ static int aufsng_copy_up_commit_regular(struct aufsng_fs *pfs,
 	 * vfs_rename() moves the file onto @work and leaves rd.new_dentry
 	 * negative; end_renaming() drops the helper's refs.
 	 */
-	rd.mnt_idmap = mnt_idmap(aufsng_upper_mnt(pfs));
-	rd.old_parent = pupper;
-	rd.new_parent = pupper;
-	err = start_renaming_dentry(&rd, 0, work, &nameq);
+	err = aufsng_start_renaming_dentry(&rd,
+					    mnt_idmap(aufsng_upper_mnt(pfs)),
+					    pupper, pupper, 0, work, &nameq);
 	if (err)
 		return err;
 	/*
@@ -345,11 +344,11 @@ static int aufsng_copy_up_commit_regular(struct aufsng_fs *pfs,
 	 * success.  Abort; the opener retries against the new state.
 	 */
 	if (d_is_positive(rd.new_dentry)) {
-		end_renaming(&rd);
+		aufsng_end_renaming(&rd, pupper, pupper);
 		return -ESTALE;
 	}
 	err = vfs_rename(&rd);
-	end_renaming(&rd);
+	aufsng_end_renaming(&rd, pupper, pupper);
 	return err;
 }
 
@@ -383,8 +382,8 @@ static struct dentry *aufsng_copy_up_inplace(struct aufsng_fs *pfs,
 
 	switch (stat->mode & S_IFMT) {
 	case S_IFDIR:
-		upper = vfs_mkdir(idmap, d_inode(pupper), slot,
-				  stat->mode, NULL);
+		upper = aufsng_vfs_mkdir(idmap, d_inode(pupper), slot,
+					 stat->mode);
 		if (IS_ERR(upper)) {
 			/* vfs_mkdir consumed the dentry and the lock */
 			do_delayed_call(&done);
@@ -393,13 +392,13 @@ static struct dentry *aufsng_copy_up_inplace(struct aufsng_fs *pfs,
 		slot = upper;
 		break;
 	case S_IFLNK:
-		err = vfs_symlink(idmap, d_inode(pupper), slot, link, NULL);
+		err = aufsng_vfs_symlink(idmap, d_inode(pupper), slot, link);
 		if (err)
 			goto out_end;
 		break;
 	default:
-		err = vfs_mknod(idmap, d_inode(pupper), slot, stat->mode,
-				stat->rdev, NULL);
+		err = aufsng_vfs_mknod(idmap, d_inode(pupper), slot, stat->mode,
+				       stat->rdev);
 		if (err)
 			goto out_end;
 		break;

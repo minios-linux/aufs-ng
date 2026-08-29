@@ -1,0 +1,2 @@
+aufsng.h compat.h Kconfig Makefile usr/src/aufs-ng-${env:DEB_VERSION_UPSTREAM}
+copy_up.c dcache.c dir.c dynlayer.c file.c inode.c namei.c params.c readdir.c super.c usr/src/aufs-ng-${env:DEB_VERSION_UPSTREAM}

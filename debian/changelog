@@ -1,0 +1,9 @@
+aufs-ng (0~git20260807.842ab15-1mos1) unstable; urgency=medium
+
+  * Initial MiniOS DKMS package.
+  * Backport aufs-ng to Linux 6.12 while retaining support for newer kernels.
+  * Handle both backing_file_open() ABIs found in the Linux 6.12 stable series.
+  * Verify the compatibility layer with the upstream 128-test UML suite on
+    Linux 6.12.94 and 6.12.105 with lockdep, RCU checks and panic_on_warn.
+
+ -- crims0n <crims0n@minios.dev>  Sat, 29 Aug 2026 17:20:00 +0300
