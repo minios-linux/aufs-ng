@@ -1,0 +1,916 @@
+Description: add Linux 6.12 compatibility
+ Backport aufs-ng to Linux 6.12 while keeping newer-kernel support. Kernel API
+ differences are isolated in compat.h, including the two backing_file_open()
+ ABIs present across the 6.12 stable series.
+Author: MiniOS Linux Team <crims0n@minios.dev>
+Forwarded: not-yet
+Last-Update: 2026-08-29
+
+diff --git a/README.md b/README.md
+index 20654f3..a3898a0 100644
+--- a/README.md
++++ b/README.md
+@@ -145,8 +145,10 @@ Also, some `aufs` features are intentionally out of scope:
+ 
+ ## Building
+ 
+-Needs a **64-bit** kernel: inode numbers carry the layer a file came
+-from in their high bits, which a 32-bit inode number cannot hold.
++Needs a **64-bit Linux 6.12 or later** kernel: inode numbers carry the
++layer a file came from in their high bits, which a 32-bit inode number
++cannot hold. Kernel API differences from 6.12 onward are isolated in
++`compat.h` so the filesystem code stays version-independent.
+ 
+ Best built **into the kernel** (`CONFIG_AUFSNG_FS=y`) as a live-boot
+ sequence typically needs this filesystem type mounted before any
+diff --git a/compat.h b/compat.h
+index 1f328fa..ac910b8 100644
+--- a/compat.h
++++ b/compat.h
+@@ -7,9 +7,527 @@
+ #define AUFSNG_COMPAT_H
+ 
+ #include <linux/version.h>
++#include <linux/namei.h>
+ 
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 1, 0)
+-#error "aufs-ng supports kernel 7.1 and later"
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
++#error "aufs-ng supports kernel 6.12 and later"
++#endif
++
++#ifndef QSTR_LEN
++#define QSTR_LEN(n, l) ((struct qstr)QSTR_INIT(n, l))
++#endif
++
++/* Linux 6.12 passes this internal flag down to ->getattr(). */
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)
++static inline int aufsng_vfs_getattr(const struct path *path,
++				     struct kstat *stat, u32 request_mask,
++				     unsigned int flags)
++{
++	if (flags & AT_GETATTR_NOSEC)
++		return vfs_getattr_nosec(path, stat, request_mask, flags);
++	return vfs_getattr(path, stat, request_mask, flags);
++}
++#else
++#define aufsng_vfs_getattr vfs_getattr
++#endif
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 14, 0)
++#define AUFSNG_D_REVALIDATE_COMPAT(fn) \
++static int fn##_compat(struct dentry *dentry, unsigned int flags) \
++{ \
++	return fn(d_inode(dentry->d_parent), &dentry->d_name, dentry, flags); \
++}
++#define AUFSNG_D_REVALIDATE_FN(fn) fn##_compat
++#else
++#define AUFSNG_D_REVALIDATE_COMPAT(fn)
++#define AUFSNG_D_REVALIDATE_FN(fn) fn
++#endif
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 0, 0)
++#define inode_state_read_once(inode) READ_ONCE((inode)->i_state)
++#define inode_state_read(inode) ((inode)->i_state)
++#define inode_state_set(inode, flags) \
++	WRITE_ONCE((inode)->i_state, (inode)->i_state | (flags))
++#endif
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 15, 0)
++#define AUFSNG_MKDIR_COMPAT(fn) \
++static int fn##_compat(struct mnt_idmap *idmap, struct inode *dir, \
++		       struct dentry *dentry, umode_t mode) \
++{ \
++	return PTR_ERR_OR_ZERO(fn(idmap, dir, dentry, mode)); \
++}
++#define AUFSNG_MKDIR_FN(fn) fn##_compat
++#else
++#define AUFSNG_MKDIR_COMPAT(fn)
++#define AUFSNG_MKDIR_FN(fn) fn
++#endif
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
++#define AUFSNG_DIR_CONTEXT_COUNT(member)
++
++static inline struct dentry *
++aufsng_lookup_one(struct mnt_idmap *idmap, const struct qstr *name,
++		  struct dentry *base)
++{
++	return lookup_one(idmap, name->name, base, name->len);
++}
++
++#define lookup_one(idmap, name, base) aufsng_lookup_one(idmap, name, base)
++#else
++#define AUFSNG_DIR_CONTEXT_COUNT(member) .member.count = INT_MAX,
++#endif
++
++/*
++ * Linux 6.12.95 stable backported the backing_file_open() LSM change
++ * from 7.1, while mainline 6.13..7.0 retain the path-based argument.
++ */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0) || \
++	(LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 95) && \
++	 LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0))
++static inline struct file *
++aufsng_backing_file_open(struct file *file, int flags,
++			 const struct path *realpath, const struct cred *cred)
++{
++	return backing_file_open(file, flags, realpath, cred);
++}
++#else
++static inline struct file *
++aufsng_backing_file_open(struct file *file, int flags,
++			 const struct path *realpath, const struct cred *cred)
++{
++	return backing_file_open(&file->f_path, flags, realpath, cred);
++}
++#endif
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
++#define AUFSNG_END_WRITE_ARGS \
++	struct file *file, loff_t pos, ssize_t ret
++#define AUFSNG_END_WRITE_FILE file
++
++static inline void aufsng_backing_ctx_set_user_file(struct backing_file_ctx *ctx,
++					     struct file *file)
++{
++	ctx->user_file = file;
++}
++
++static inline ssize_t
++aufsng_backing_file_splice_read(struct file *in, struct kiocb *iocb,
++				struct pipe_inode_info *pipe, size_t len,
++				unsigned int flags, struct backing_file_ctx *ctx)
++{
++	ssize_t ret = backing_file_splice_read(in, &iocb->ki_pos, pipe, len,
++					       flags, ctx);
++
++	return ret;
++}
++
++static inline ssize_t
++aufsng_backing_file_splice_write(struct pipe_inode_info *pipe, struct file *out,
++				 struct kiocb *iocb, size_t len,
++				 unsigned int flags, struct backing_file_ctx *ctx)
++{
++	return backing_file_splice_write(pipe, out, &iocb->ki_pos, len, flags, ctx);
++}
++#else
++#define AUFSNG_END_WRITE_ARGS struct kiocb *iocb, ssize_t ret
++#define AUFSNG_END_WRITE_FILE (iocb->ki_filp)
++
++static inline void aufsng_backing_ctx_set_user_file(struct backing_file_ctx *ctx,
++					     struct file *file)
++{
++}
++
++#define aufsng_backing_file_splice_read backing_file_splice_read
++#define aufsng_backing_file_splice_write backing_file_splice_write
++#endif
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
++#define set_default_d_op(sb, op) ((sb)->s_d_op = (op))
++#endif
++#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 0, 0)
++#define name_is_dot_dotdot(name, len) is_dot_dotdot(name, len)
++
++static inline int aufsng_lookup_noperm_common(struct qstr *qname,
++					      struct dentry *base)
++{
++	const char *name = qname->name;
++	u32 len = qname->len;
++
++	qname->hash = full_name_hash(base, name, len);
++	if (!len || is_dot_dotdot(name, len))
++		return -EACCES;
++	while (len--) {
++		unsigned int c = *(const unsigned char *)name++;
++
++		if (c == '/' || c == '\0')
++			return -EACCES;
++	}
++	if (base->d_flags & DCACHE_OP_HASH) {
++		int err = base->d_op->d_hash(base, qname);
++
++		if (err < 0)
++			return err;
++	}
++	return 0;
++}
++
++static inline int aufsng_lookup_common(struct mnt_idmap *idmap,
++				       struct qstr *qname,
++				       struct dentry *base)
++{
++	int err = aufsng_lookup_noperm_common(qname, base);
++
++	return err ? err : inode_permission(idmap, d_inode(base), MAY_EXEC);
++}
++
++static inline struct dentry *
++aufsng_start_dirop(struct dentry *parent, struct qstr *name,
++		   unsigned int lookup_flags)
++{
++	struct inode *dir = d_inode(parent);
++	struct dentry *dentry;
++	int err;
++
++	err = aufsng_lookup_noperm_common(name, parent);
++	if (err)
++		return ERR_PTR(err);
++	inode_lock_nested(dir, I_MUTEX_PARENT);
++	dentry = lookup_one_qstr_excl(name, parent, lookup_flags);
++	if (IS_ERR(dentry))
++		goto out_unlock;
++	if (!(lookup_flags & LOOKUP_CREATE) && d_is_negative(dentry)) {
++		dput(dentry);
++		dentry = ERR_PTR(-ENOENT);
++		goto out_unlock;
++	}
++	if ((lookup_flags & LOOKUP_EXCL) && d_is_positive(dentry)) {
++		dput(dentry);
++		dentry = ERR_PTR(-EEXIST);
++		goto out_unlock;
++	}
++	return dentry;
++
++out_unlock:
++	inode_unlock(dir);
++	return dentry;
++}
++
++static inline struct dentry *
++aufsng_start_creating_noperm(struct dentry *parent, struct qstr *name)
++{
++	return aufsng_start_dirop(parent, name, LOOKUP_CREATE);
++}
++
++static inline struct dentry *
++aufsng_start_removing_noperm(struct dentry *parent, struct qstr *name)
++{
++	return aufsng_start_dirop(parent, name, 0);
++}
++
++static inline void aufsng_end_dirop(struct dentry *dentry)
++{
++	if (!IS_ERR(dentry)) {
++		inode_unlock(d_inode(dentry->d_parent));
++		dput(dentry);
++	}
++}
++
++#define start_creating_noperm aufsng_start_creating_noperm
++#define start_removing_noperm aufsng_start_removing_noperm
++#define end_dirop aufsng_end_dirop
++
++static inline int aufsng_vfs_create(struct mnt_idmap *idmap,
++				    struct dentry *dentry, umode_t mode)
++{
++	return vfs_create(idmap, d_inode(dentry->d_parent), dentry, mode, true);
++}
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 15, 0)
++static inline struct dentry *
++aufsng_vfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
++		 struct dentry *dentry, umode_t mode)
++{
++	int err = vfs_mkdir(idmap, dir, dentry, mode);
++
++	if (err) {
++		aufsng_end_dirop(dentry);
++		return ERR_PTR(err);
++	}
++	return dentry;
++}
++#else
++static inline struct dentry *
++aufsng_vfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
++		 struct dentry *dentry, umode_t mode)
++{
++	struct dentry *ret = vfs_mkdir(idmap, dir, dentry, mode);
++
++	if (IS_ERR(ret))
++		inode_unlock(dir);
++	return ret;
++}
++#endif
++
++static inline int aufsng_vfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
++				   struct dentry *dentry, umode_t mode,
++				   dev_t dev)
++{
++	return vfs_mknod(idmap, dir, dentry, mode, dev);
++}
++
++static inline int aufsng_vfs_symlink(struct mnt_idmap *idmap,
++				     struct inode *dir,
++				     struct dentry *dentry,
++				     const char *oldname)
++{
++	return vfs_symlink(idmap, dir, dentry, oldname);
++}
++
++static inline int aufsng_vfs_rmdir(struct mnt_idmap *idmap, struct inode *dir,
++				   struct dentry *dentry)
++{
++	return vfs_rmdir(idmap, dir, dentry);
++}
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
++static inline void aufsng_renamedata_init(struct renamedata *rd,
++					  struct mnt_idmap *idmap,
++					  struct dentry *old_parent,
++					  struct dentry *new_parent)
++{
++	rd->old_mnt_idmap = idmap;
++	rd->old_dir = d_inode(old_parent);
++	rd->new_mnt_idmap = idmap;
++	rd->new_dir = d_inode(new_parent);
++}
++#else
++static inline void aufsng_renamedata_init(struct renamedata *rd,
++					  struct mnt_idmap *idmap,
++					  struct dentry *old_parent,
++					  struct dentry *new_parent)
++{
++	rd->mnt_idmap = idmap;
++	rd->old_parent = old_parent;
++	rd->new_parent = new_parent;
++}
++#endif
++
++static inline int
++aufsng_start_renaming(struct renamedata *rd, struct mnt_idmap *idmap,
++		      struct dentry *old_parent, struct dentry *new_parent,
++		      int lookup_flags, struct qstr *old_last,
++		      struct qstr *new_last)
++{
++	struct dentry *trap, *d1, *d2;
++	int target_flags = LOOKUP_RENAME_TARGET | LOOKUP_CREATE;
++	int err;
++
++	aufsng_renamedata_init(rd, idmap, old_parent, new_parent);
++	err = aufsng_lookup_common(idmap, old_last, old_parent);
++	if (err)
++		return err;
++	err = aufsng_lookup_common(idmap, new_last, new_parent);
++	if (err)
++		return err;
++	if (rd->flags & RENAME_EXCHANGE)
++		target_flags = 0;
++	if (rd->flags & RENAME_NOREPLACE)
++		target_flags |= LOOKUP_EXCL;
++
++	trap = lock_rename(old_parent, new_parent);
++	if (IS_ERR(trap))
++		return PTR_ERR(trap);
++	d1 = lookup_one_qstr_excl(old_last, old_parent, lookup_flags);
++	if (IS_ERR(d1)) {
++		err = PTR_ERR(d1);
++		goto out_unlock;
++	}
++	if (d_is_negative(d1)) {
++		err = -ENOENT;
++		goto out_dput_d1;
++	}
++	d2 = lookup_one_qstr_excl(new_last, new_parent,
++				  lookup_flags | target_flags);
++	if (IS_ERR(d2)) {
++		err = PTR_ERR(d2);
++		goto out_dput_d1;
++	}
++	if (d_is_negative(d2) && !(target_flags & LOOKUP_CREATE)) {
++		err = -ENOENT;
++		goto out_dput_d2;
++	}
++	if (d_is_positive(d2) && (target_flags & LOOKUP_EXCL)) {
++		err = -EEXIST;
++		goto out_dput_d2;
++	}
++	if (d1 == trap) {
++		err = -EINVAL;
++		goto out_dput_d2;
++	}
++	if (d2 == trap) {
++		err = (rd->flags & RENAME_EXCHANGE) ? -EINVAL : -ENOTEMPTY;
++		goto out_dput_d2;
++	}
++	rd->old_dentry = d1;
++	rd->new_dentry = d2;
++	return 0;
++
++out_dput_d2:
++	dput(d2);
++out_dput_d1:
++	dput(d1);
++out_unlock:
++	unlock_rename(old_parent, new_parent);
++	return err;
++}
++
++static inline int
++aufsng_start_renaming_dentry(struct renamedata *rd, struct mnt_idmap *idmap,
++			     struct dentry *old_parent,
++			     struct dentry *new_parent, int lookup_flags,
++			     struct dentry *old_dentry,
++			     struct qstr *new_last)
++{
++	struct dentry *trap, *d2;
++	int target_flags = LOOKUP_RENAME_TARGET | LOOKUP_CREATE;
++	int err;
++
++	aufsng_renamedata_init(rd, idmap, old_parent, new_parent);
++	err = aufsng_lookup_common(idmap, new_last, new_parent);
++	if (err)
++		return err;
++	if (rd->flags & RENAME_EXCHANGE)
++		target_flags = 0;
++	if (rd->flags & RENAME_NOREPLACE)
++		target_flags |= LOOKUP_EXCL;
++
++	trap = lock_rename_child(old_dentry, new_parent);
++	if (IS_ERR(trap))
++		return PTR_ERR(trap);
++	if (d_unhashed(old_dentry) || old_parent != old_dentry->d_parent) {
++		err = -EINVAL;
++		goto out_unlock;
++	}
++	d2 = lookup_one_qstr_excl(new_last, new_parent,
++				  lookup_flags | target_flags);
++	if (IS_ERR(d2)) {
++		err = PTR_ERR(d2);
++		goto out_unlock;
++	}
++	if (d_is_negative(d2) && !(target_flags & LOOKUP_CREATE)) {
++		err = -ENOENT;
++		goto out_dput_d2;
++	}
++	if (d_is_positive(d2) && (target_flags & LOOKUP_EXCL)) {
++		err = -EEXIST;
++		goto out_dput_d2;
++	}
++	if (old_dentry == trap) {
++		err = -EINVAL;
++		goto out_dput_d2;
++	}
++	if (d2 == trap) {
++		err = (rd->flags & RENAME_EXCHANGE) ? -EINVAL : -ENOTEMPTY;
++		goto out_dput_d2;
++	}
++	rd->old_dentry = dget(old_dentry);
++	rd->new_dentry = d2;
++	return 0;
++
++out_dput_d2:
++	dput(d2);
++out_unlock:
++	unlock_rename(old_dentry->d_parent, new_parent);
++	return err;
++}
++
++static inline void aufsng_end_renaming(struct renamedata *rd,
++				       struct dentry *old_parent,
++				       struct dentry *new_parent)
++{
++	unlock_rename(old_parent, new_parent);
++	dput(rd->old_dentry);
++	dput(rd->new_dentry);
++}
++#else
++static inline int aufsng_vfs_create(struct mnt_idmap *idmap,
++				    struct dentry *dentry, umode_t mode)
++{
++	return vfs_create(idmap, dentry, mode, NULL);
++}
++
++static inline struct dentry *
++aufsng_vfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
++		 struct dentry *dentry, umode_t mode)
++{
++	return vfs_mkdir(idmap, dir, dentry, mode, NULL);
++}
++
++static inline int aufsng_vfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
++				   struct dentry *dentry, umode_t mode,
++				   dev_t dev)
++{
++	return vfs_mknod(idmap, dir, dentry, mode, dev, NULL);
++}
++
++static inline int aufsng_vfs_symlink(struct mnt_idmap *idmap,
++				     struct inode *dir,
++				     struct dentry *dentry,
++				     const char *oldname)
++{
++	return vfs_symlink(idmap, dir, dentry, oldname, NULL);
++}
++
++static inline int aufsng_vfs_rmdir(struct mnt_idmap *idmap, struct inode *dir,
++				   struct dentry *dentry)
++{
++	return vfs_rmdir(idmap, dir, dentry, NULL);
++}
++
++static inline int
++aufsng_start_renaming(struct renamedata *rd, struct mnt_idmap *idmap,
++		      struct dentry *old_parent, struct dentry *new_parent,
++		      int lookup_flags, struct qstr *old_last,
++		      struct qstr *new_last)
++{
++	rd->mnt_idmap = idmap;
++	rd->old_parent = old_parent;
++	rd->new_parent = new_parent;
++	return start_renaming(rd, lookup_flags, old_last, new_last);
++}
++
++static inline int
++aufsng_start_renaming_dentry(struct renamedata *rd, struct mnt_idmap *idmap,
++			     struct dentry *old_parent,
++			     struct dentry *new_parent, int lookup_flags,
++			     struct dentry *old_dentry,
++			     struct qstr *new_last)
++{
++	rd->mnt_idmap = idmap;
++	rd->old_parent = old_parent;
++	rd->new_parent = new_parent;
++	return start_renaming_dentry(rd, lookup_flags, old_dentry, new_last);
++}
++
++static inline void aufsng_end_renaming(struct renamedata *rd,
++				       struct dentry *old_parent,
++				       struct dentry *new_parent)
++{
++	end_renaming(rd);
++}
++#endif
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
++static inline struct dentry *
++aufsng_lookup_one_positive_unlocked(struct mnt_idmap *idmap,
++				    const struct qstr *name,
++				    struct dentry *base)
++{
++	return lookup_one_positive_unlocked(idmap, name->name, base, name->len);
++}
++
++#define lookup_one_positive_unlocked(idmap, name, base) \
++	aufsng_lookup_one_positive_unlocked(idmap, name, base)
+ #endif
+ 
+ #endif /* AUFSNG_COMPAT_H */
+diff --git a/copy_up.c b/copy_up.c
+index d358f81..7b3a9ed 100644
+--- a/copy_up.c
++++ b/copy_up.c
+@@ -266,7 +266,7 @@ static struct dentry *aufsng_copy_up_prep_regular(struct aufsng_fs *pfs,
+ 			goto out_drop;
+ 		}
+ 	}
+-	err = vfs_create(idmap, work, S_IFREG | 0600, NULL);
++	err = aufsng_vfs_create(idmap, work, S_IFREG | 0600);
+ 	if (err) {
+ 		end_dirop(work);
+ 		work = ERR_PTR(err);
+@@ -331,10 +331,9 @@ static int aufsng_copy_up_commit_regular(struct aufsng_fs *pfs,
+ 	 * vfs_rename() moves the file onto @work and leaves rd.new_dentry
+ 	 * negative; end_renaming() drops the helper's refs.
+ 	 */
+-	rd.mnt_idmap = mnt_idmap(aufsng_upper_mnt(pfs));
+-	rd.old_parent = pupper;
+-	rd.new_parent = pupper;
+-	err = start_renaming_dentry(&rd, 0, work, &nameq);
++	err = aufsng_start_renaming_dentry(&rd,
++					    mnt_idmap(aufsng_upper_mnt(pfs)),
++					    pupper, pupper, 0, work, &nameq);
+ 	if (err)
+ 		return err;
+ 	/*
+@@ -345,11 +344,11 @@ static int aufsng_copy_up_commit_regular(struct aufsng_fs *pfs,
+ 	 * success.  Abort; the opener retries against the new state.
+ 	 */
+ 	if (d_is_positive(rd.new_dentry)) {
+-		end_renaming(&rd);
++		aufsng_end_renaming(&rd, pupper, pupper);
+ 		return -ESTALE;
+ 	}
+ 	err = vfs_rename(&rd);
+-	end_renaming(&rd);
++	aufsng_end_renaming(&rd, pupper, pupper);
+ 	return err;
+ }
+ 
+@@ -383,8 +382,8 @@ static struct dentry *aufsng_copy_up_inplace(struct aufsng_fs *pfs,
+ 
+ 	switch (stat->mode & S_IFMT) {
+ 	case S_IFDIR:
+-		upper = vfs_mkdir(idmap, d_inode(pupper), slot,
+-				  stat->mode, NULL);
++		upper = aufsng_vfs_mkdir(idmap, d_inode(pupper), slot,
++					 stat->mode);
+ 		if (IS_ERR(upper)) {
+ 			/* vfs_mkdir consumed the dentry and the lock */
+ 			do_delayed_call(&done);
+@@ -393,13 +392,13 @@ static struct dentry *aufsng_copy_up_inplace(struct aufsng_fs *pfs,
+ 		slot = upper;
+ 		break;
+ 	case S_IFLNK:
+-		err = vfs_symlink(idmap, d_inode(pupper), slot, link, NULL);
++		err = aufsng_vfs_symlink(idmap, d_inode(pupper), slot, link);
+ 		if (err)
+ 			goto out_end;
+ 		break;
+ 	default:
+-		err = vfs_mknod(idmap, d_inode(pupper), slot, stat->mode,
+-				stat->rdev, NULL);
++		err = aufsng_vfs_mknod(idmap, d_inode(pupper), slot, stat->mode,
++				       stat->rdev);
+ 		if (err)
+ 			goto out_end;
+ 		break;
+diff --git a/dcache.c b/dcache.c
+index c9f55c1..4367e03 100644
+--- a/dcache.c
++++ b/dcache.c
+@@ -289,6 +289,8 @@ static int aufsng_d_revalidate(struct inode *dir, const struct qstr *name,
+ 	return aufsng_positive_valid(dir, name, dentry, flags);
+ }
+ 
++AUFSNG_D_REVALIDATE_COMPAT(aufsng_d_revalidate)
++
+ const struct dentry_operations aufsng_dentry_operations = {
+-	.d_revalidate		= aufsng_d_revalidate,
++	.d_revalidate		= AUFSNG_D_REVALIDATE_FN(aufsng_d_revalidate),
+ };
+diff --git a/dir.c b/dir.c
+index 1652d06..08f659c 100644
+--- a/dir.c
++++ b/dir.c
+@@ -60,7 +60,7 @@ static int aufsng_create_marker(struct aufsng_fs *pfs, struct dentry *upperdir,
+ 		end_dirop(slot);
+ 		return 0;	/* already marked */
+ 	}
+-	err = vfs_create(idmap, slot, S_IFREG | AUFSNG_WH_MODE, NULL);
++	err = aufsng_vfs_create(idmap, slot, S_IFREG | AUFSNG_WH_MODE);
+ 	end_dirop(slot);
+ 	return err;
+ }
+@@ -153,7 +153,7 @@ static int aufsng_do_remove_object(struct aufsng_fs *pfs,
+ 	if (is_dir) {
+ 		err = aufsng_clear_whiteouts(pfs, slot);
+ 		if (!err)
+-			err = vfs_rmdir(idmap, d_inode(upperdir), slot, NULL);
++			err = aufsng_vfs_rmdir(idmap, d_inode(upperdir), slot);
+ 	} else {
+ 		err = vfs_unlink(idmap, d_inode(upperdir), slot, NULL);
+ 	}
+@@ -195,13 +195,11 @@ static int aufsng_branch_rename(struct aufsng_fs *pfs,
+ 	struct qstr dstq = QSTR_LEN(dst->name, dst->len);
+ 	int err;
+ 
+-	rd.mnt_idmap = mnt_idmap(aufsng_upper_mnt(pfs));
+-	rd.old_parent = src_parent;
+-	rd.new_parent = dst_parent;
+-	err = start_renaming(&rd, 0, &srcq, &dstq);
++	err = aufsng_start_renaming(&rd, mnt_idmap(aufsng_upper_mnt(pfs)),
++				    src_parent, dst_parent, 0, &srcq, &dstq);
+ 	if (!err) {
+ 		err = vfs_rename(&rd);
+-		end_renaming(&rd);
++		aufsng_end_renaming(&rd, src_parent, dst_parent);
+ 	}
+ 	return err;
+ }
+@@ -356,10 +354,10 @@ static int aufsng_create_object(struct dentry *dentry,
+ 
+ 	switch (a->mode & S_IFMT) {
+ 	case S_IFREG:
+-		err = vfs_create(idmap, slot, a->mode, NULL);
++		err = aufsng_vfs_create(idmap, slot, a->mode);
+ 		break;
+ 	case S_IFDIR:
+-		made = vfs_mkdir(idmap, d_inode(pupper), slot, a->mode, NULL);
++		made = aufsng_vfs_mkdir(idmap, d_inode(pupper), slot, a->mode);
+ 		if (IS_ERR(made)) {
+ 			/* vfs_mkdir consumed the dentry and the lock */
+ 			err = PTR_ERR(made);
+@@ -369,12 +367,11 @@ static int aufsng_create_object(struct dentry *dentry,
+ 		err = 0;
+ 		break;
+ 	case S_IFLNK:
+-		err = vfs_symlink(idmap, d_inode(pupper), slot, a->link,
+-				  NULL);
++		err = aufsng_vfs_symlink(idmap, d_inode(pupper), slot, a->link);
+ 		break;
+ 	default:
+-		err = vfs_mknod(idmap, d_inode(pupper), slot, a->mode,
+-				a->rdev, NULL);
++		err = aufsng_vfs_mknod(idmap, d_inode(pupper), slot, a->mode,
++				       a->rdev);
+ 		break;
+ 	}
+ 	if (err) {
+@@ -891,9 +888,6 @@ int aufsng_rename(struct mnt_idmap *idmap, struct inode *olddir,
+ 		}
+ 	}
+ 
+-	rd.mnt_idmap = upper_idmap;
+-	rd.old_parent = oldupperdir;
+-	rd.new_parent = newupperdir;
+ 	rd.flags = flags;
+ 	{
+ 		struct qstr oldq = QSTR_LEN(old->d_name.name,
+@@ -901,12 +895,13 @@ int aufsng_rename(struct mnt_idmap *idmap, struct inode *olddir,
+ 		struct qstr newq = QSTR_LEN(new->d_name.name,
+ 					    new->d_name.len);
+ 
+-		err = start_renaming(&rd, 0, &oldq, &newq);
++		err = aufsng_start_renaming(&rd, upper_idmap, oldupperdir,
++					    newupperdir, 0, &oldq, &newq);
+ 	}
+ 	if (!err) {
+ 		had_victim = d_is_positive(rd.new_dentry);
+ 		err = vfs_rename(&rd);
+-		end_renaming(&rd);
++		aufsng_end_renaming(&rd, oldupperdir, newupperdir);
+ 	}
+ 	if (err)
+ 		goto out_unpark;
+diff --git a/file.c b/file.c
+index 40fcd19..6dc35fc 100644
+--- a/file.c
++++ b/file.c
+@@ -23,16 +23,19 @@ static void aufsng_file_accessed(struct file *file)
+ 		inode_set_atime_to_ts(inode, inode_get_atime(real));
+ }
+ 
+-static void aufsng_file_end_write(struct kiocb *iocb, ssize_t ret)
++static void aufsng_file_end_write(AUFSNG_END_WRITE_ARGS)
+ {
+-	struct inode *inode = file_inode(iocb->ki_filp);
++	struct inode *inode = file_inode(AUFSNG_END_WRITE_FILE);
+ 
+ 	aufsng_copyattr(inode);
+ }
+ 
+-static struct backing_file_ctx *aufsng_backing_ctx(struct super_block *sb)
++static struct backing_file_ctx aufsng_backing_ctx(struct file *file)
+ {
+-	return &AUFSNG_FS(sb)->backing_ctx;
++	struct backing_file_ctx ctx = AUFSNG_FS(file_inode(file)->i_sb)->backing_ctx;
++
++	aufsng_backing_ctx_set_user_file(&ctx, file);
++	return ctx;
+ }
+ 
+ static int aufsng_open(struct inode *inode, struct file *file)
+@@ -50,8 +53,8 @@ static int aufsng_open(struct inode *inode, struct file *file)
+ 	}
+ 
+ 	aufsng_path_real(inode, &realpath);
+-	realfile = backing_file_open(file, file->f_flags, &realpath,
+-				     pfs->creator_cred);
++	realfile = aufsng_backing_file_open(file, file->f_flags, &realpath,
++					    pfs->creator_cred);
+ 	if (IS_ERR(realfile))
+ 		return PTR_ERR(realfile);
+ 
+@@ -96,10 +99,10 @@ static loff_t aufsng_llseek(struct file *file, loff_t offset, int whence)
+ static ssize_t aufsng_read_iter(struct kiocb *iocb, struct iov_iter *iter)
+ {
+ 	struct file *file = iocb->ki_filp;
++	struct backing_file_ctx ctx = aufsng_backing_ctx(file);
+ 
+ 	return backing_file_read_iter(file->private_data, iter, iocb,
+-				      iocb->ki_flags,
+-				      aufsng_backing_ctx(file_inode(file)->i_sb));
++				      iocb->ki_flags, &ctx);
+ }
+ 
+ static ssize_t aufsng_write_iter(struct kiocb *iocb, struct iov_iter *iter)
+@@ -117,9 +120,12 @@ static ssize_t aufsng_write_iter(struct kiocb *iocb, struct iov_iter *iter)
+ 	 * its i_rwsem (as ovl_write_iter).
+ 	 */
+ 	inode_lock(inode);
+-	ret = backing_file_write_iter(file->private_data, iter, iocb,
+-				      iocb->ki_flags,
+-				      aufsng_backing_ctx(inode->i_sb));
++	{
++		struct backing_file_ctx ctx = aufsng_backing_ctx(file);
++
++		ret = backing_file_write_iter(file->private_data, iter, iocb,
++					      iocb->ki_flags, &ctx);
++	}
+ 	inode_unlock(inode);
+ 
+ 	return ret;
+@@ -134,9 +140,12 @@ static ssize_t aufsng_splice_read(struct file *in, loff_t *ppos,
+ 
+ 	init_sync_kiocb(&iocb, in);
+ 	iocb.ki_pos = *ppos;
+-	ret = backing_file_splice_read(in->private_data, &iocb, pipe, len,
+-				       flags,
+-				       aufsng_backing_ctx(file_inode(in)->i_sb));
++	{
++		struct backing_file_ctx ctx = aufsng_backing_ctx(in);
++
++		ret = aufsng_backing_file_splice_read(in->private_data, &iocb,
++						     pipe, len, flags, &ctx);
++	}
+ 	*ppos = iocb.ki_pos;
+ 
+ 	return ret;
+@@ -153,9 +162,12 @@ static ssize_t aufsng_splice_write(struct pipe_inode_info *pipe, struct file *ou
+ 	inode_lock(inode);
+ 	init_sync_kiocb(&iocb, out);
+ 	iocb.ki_pos = *ppos;
+-	ret = backing_file_splice_write(pipe, out->private_data, &iocb, len,
+-					flags,
+-					aufsng_backing_ctx(inode->i_sb));
++	{
++		struct backing_file_ctx ctx = aufsng_backing_ctx(out);
++
++		ret = aufsng_backing_file_splice_write(pipe, out->private_data,
++						      &iocb, len, flags, &ctx);
++	}
+ 	*ppos = iocb.ki_pos;
+ 	inode_unlock(inode);
+ 
+@@ -164,8 +176,9 @@ static ssize_t aufsng_splice_write(struct pipe_inode_info *pipe, struct file *ou
+ 
+ static int aufsng_mmap(struct file *file, struct vm_area_struct *vma)
+ {
+-	return backing_file_mmap(file->private_data, vma,
+-				 aufsng_backing_ctx(file_inode(file)->i_sb));
++	struct backing_file_ctx ctx = aufsng_backing_ctx(file);
++
++	return backing_file_mmap(file->private_data, vma, &ctx);
+ }
+ 
+ static int aufsng_fsync(struct file *file, loff_t start, loff_t end,
+diff --git a/inode.c b/inode.c
+index 55f24a5..c1f6622 100644
+--- a/inode.c
++++ b/inode.c
+@@ -25,7 +25,7 @@ static int aufsng_getattr(struct mnt_idmap *idmap, const struct path *path,
+ 
+ 	aufsng_path_real(inode, &realpath);
+ 	old_cred = override_creds(pfs->creator_cred);
+-	err = vfs_getattr(&realpath, stat, request_mask, flags);
++	err = aufsng_vfs_getattr(&realpath, stat, request_mask, flags);
+ 	revert_creds(old_cred);
+ 	if (err)
+ 		return err;
+@@ -236,10 +236,12 @@ const struct xattr_handler * const aufsng_xattr_handlers[] = {
+ 	NULL,
+ };
+ 
++AUFSNG_MKDIR_COMPAT(aufsng_mkdir)
++
+ const struct inode_operations aufsng_dir_inode_operations = {
+ 	.lookup		= aufsng_lookup,
+ 	.create		= aufsng_create,
+-	.mkdir		= aufsng_mkdir,
++	.mkdir		= AUFSNG_MKDIR_FN(aufsng_mkdir),
+ 	.mknod		= aufsng_mknod,
+ 	.symlink	= aufsng_symlink,
+ 	.link		= aufsng_link,
+diff --git a/readdir.c b/readdir.c
+index 1d9ca52..7ff9d95 100644
+--- a/readdir.c
++++ b/readdir.c
+@@ -24,7 +24,6 @@
+ #include <linux/refcount.h>
+ #include <linux/iversion.h>
+ #include <linux/rcupdate.h>
+-#include <linux/fs_dirent.h>
+ #include "aufsng.h"
+ 
+ struct aufsng_cache_entry {
+@@ -344,7 +343,7 @@ static int aufsng_dir_read_layer(struct aufsng_fs *pfs, const struct path *realp
+ {
+ 	struct aufsng_readdir_data rdd = {
+ 		.dd.ctx.actor = aufsng_fill_merge,
+-		.dd.ctx.count = INT_MAX,
++		AUFSNG_DIR_CONTEXT_COUNT(dd.ctx)
+ 		.cache = cache,
+ 		.idx = idx,
+ 	};
+@@ -768,7 +767,7 @@ int aufsng_clear_whiteouts(struct aufsng_fs *pfs, struct dentry *upperdir)
+ 	struct mnt_idmap *idmap = mnt_idmap(aufsng_upper_mnt(pfs));
+ 	struct aufsng_wh_sweep sw = {
+ 		.dd.ctx.actor = aufsng_wh_sweep_actor,
+-		.dd.ctx.count = INT_MAX,
++		AUFSNG_DIR_CONTEXT_COUNT(dd.ctx)
+ 	};
+ 	struct aufsng_wh_sweep_name *p, *n;
+ 	struct path realpath = {
+@@ -811,9 +810,7 @@ int aufsng_clear_whiteouts(struct aufsng_fs *pfs, struct dentry *upperdir)
+ 				 * dir; sweep them too.
+ 				 */
+ 				if (d_is_dir(whd))
+-					e = vfs_rmdir(idmap,
+-						      d_inode(upperdir),
+-						      whd, NULL);
++					e = aufsng_vfs_rmdir(idmap, d_inode(upperdir), whd);
+ 				else
+ 					e = vfs_unlink(idmap,
+ 						       d_inode(upperdir),

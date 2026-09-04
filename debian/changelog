@@ -1,3 +1,16 @@
+aufs-ng (0~git20260807.842ab15-1minios2) unstable; urgency=medium
+
+  * Allow dynamic branch removal to converge duplicate pinned directory
+    generations created when inotify keeps an inode alive after its dentry is
+    reclaimed.
+  * Keep the hardlink collision guard unchanged for non-directory inodes.
+  * Add a UML regression for two inotify-pinned directory generations across
+    dynamic branch add/remove.
+  * Package MiniOS source changes as quilt patches against the pristine
+    upstream snapshot.
+
+ -- crims0n <crims0n@minios.dev>  Fri, 04 Sep 2026 20:39:20 +0300
+
 aufs-ng (0~git20260807.842ab15-1minios1) unstable; urgency=medium
 
   * Initial MiniOS DKMS package.
