@@ -7,6 +7,7 @@
 
 #include <linux/module.h>
 #include <linux/fs.h>
+#include <linux/fscrypt.h>
 #include <linux/fs_context.h>
 #include <linux/mount.h>
 #include <linux/namei.h>
@@ -298,13 +299,29 @@ const struct super_operations aufsng_super_operations = {
 int aufsng_check_layer(struct super_block *sb, const struct path *path,
 		    const char *name)
 {
+	struct dentry *dentry = path->dentry;
+	unsigned int flags = dentry->d_flags;
+
+#if IS_ENABLED(CONFIG_FS_ENCRYPTION)
+	/*
+	 * ext4 installs fscrypt_d_revalidate on its filesystem root even
+	 * without encryption. Plaintext names always validate successfully;
+	 * unlike remote-fs callbacks, this is not external namespace state.
+	 * Keep no-key, encrypted, casefold and weak-revalidation cases out.
+	 * Only filter our local test; never change the backing dentry flags.
+	 */
+	if (dentry == dentry->d_sb->s_root && dentry->d_op &&
+	    dentry->d_op->d_revalidate == fscrypt_d_revalidate &&
+	    d_is_dir(dentry) && !IS_ENCRYPTED(d_inode(dentry)) &&
+	    !(flags & (DCACHE_NOKEY_NAME | DCACHE_OP_HASH | DCACHE_OP_COMPARE)))
+		flags &= ~DCACHE_OP_REVALIDATE;
+#endif
 	if (!d_is_dir(path->dentry)) {
 		pr_err("aufs: %s is not a directory\n", name);
 		return -ENOTDIR;
 	}
 	/* Branches needing dentry revalidation (remote fs) are unsupported */
-	if (path->dentry->d_flags & (DCACHE_OP_REVALIDATE |
-				     DCACHE_OP_WEAK_REVALIDATE)) {
+	if (flags & (DCACHE_OP_REVALIDATE | DCACHE_OP_WEAK_REVALIDATE)) {
 		pr_err("aufs: %s is on a remote filesystem, not supported\n",
 		       name);
 		return -EINVAL;

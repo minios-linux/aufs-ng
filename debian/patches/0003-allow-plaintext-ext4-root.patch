@@ -1,0 +1,150 @@
+Description: Accept plaintext ext4 filesystem roots with fscrypt revalidation
+ Linux can attach fscrypt_d_revalidate to an unencrypted filesystem root.
+ Do not classify that always-valid plaintext root as a remote filesystem.
+ Keep encrypted, no-key, casefold, weak and other revalidation cases rejected.
+Origin: vendor
+Forwarded: no
+
+diff --git a/super.c b/super.c
+index 48dc31a..9af0146 100644
+--- a/super.c
++++ b/super.c
+@@ -7,6 +7,7 @@
+ 
+ #include <linux/module.h>
+ #include <linux/fs.h>
++#include <linux/fscrypt.h>
+ #include <linux/fs_context.h>
+ #include <linux/mount.h>
+ #include <linux/namei.h>
+@@ -298,13 +299,29 @@ const struct super_operations aufsng_super_operations = {
+ int aufsng_check_layer(struct super_block *sb, const struct path *path,
+ 		    const char *name)
+ {
++	struct dentry *dentry = path->dentry;
++	unsigned int flags = dentry->d_flags;
++
++#if IS_ENABLED(CONFIG_FS_ENCRYPTION)
++	/*
++	 * ext4 installs fscrypt_d_revalidate on its filesystem root even
++	 * without encryption. Plaintext names always validate successfully;
++	 * unlike remote-fs callbacks, this is not external namespace state.
++	 * Keep no-key, encrypted, casefold and weak-revalidation cases out.
++	 * Only filter our local test; never change the backing dentry flags.
++	 */
++	if (dentry == dentry->d_sb->s_root && dentry->d_op &&
++	    dentry->d_op->d_revalidate == fscrypt_d_revalidate &&
++	    d_is_dir(dentry) && !IS_ENCRYPTED(d_inode(dentry)) &&
++	    !(flags & (DCACHE_NOKEY_NAME | DCACHE_OP_HASH | DCACHE_OP_COMPARE)))
++		flags &= ~DCACHE_OP_REVALIDATE;
++#endif
+ 	if (!d_is_dir(path->dentry)) {
+ 		pr_err("aufs: %s is not a directory\n", name);
+ 		return -ENOTDIR;
+ 	}
+ 	/* Branches needing dentry revalidation (remote fs) are unsupported */
+-	if (path->dentry->d_flags & (DCACHE_OP_REVALIDATE |
+-				     DCACHE_OP_WEAK_REVALIDATE)) {
++	if (flags & (DCACHE_OP_REVALIDATE | DCACHE_OP_WEAK_REVALIDATE)) {
+ 		pr_err("aufs: %s is on a remote filesystem, not supported\n",
+ 		       name);
+ 		return -EINVAL;
+diff --git a/tests/README.md b/tests/README.md
+index 6a5a32a..19601f2 100644
+--- a/tests/README.md
++++ b/tests/README.md
+@@ -59,3 +59,17 @@ description unique — a failure's `TEST-FAIL:` marker is grepped
+ verbatim by the host judge. Then bump **`TOTAL`** in `guest_main()`;
+ the suite asserts `TOTAL` matches the number of checks actually run,
+ so a stale count fails the run loudly rather than silently.
++
++## ext4 filesystem-root regression on a distribution kernel
++
++`ext4-root-vm.sh` checks the fscrypt-enabled ext4 root-dentry mount regression
++on a real distribution kernel. It is separate from the tmpfs-oriented UML
++suite and refuses to run unless the disposable VM has `aufsng_test=1` in its
++kernel command line. Run it as root only in that VM after loading the candidate
++module.
++
++It creates private temporary loop images and checks an ext4 root as upper,
++bind-mounted upper, static lower and dynamically added lower; copy-up and
++whiteouts; the existing subdirectory case; and rejection of casefold roots and
++AUFS roots with non-fscrypt revalidation callbacks. The helper does not install
++or replace a kernel module itself.
+diff --git a/tests/ext4-root-vm.sh b/tests/ext4-root-vm.sh
+new file mode 100644
+index 0000000..1f54715
+--- /dev/null
++++ b/tests/ext4-root-vm.sh
+@@ -0,0 +1,71 @@
++#!/bin/bash
++# Run only in a disposable Testo VM booted with aufsng_test=1.
++set -euo pipefail
++if [ "${EUID}" != 0 ] || ! grep -qw aufsng_test=1 /proc/cmdline; then
++    echo 'Requires root inside a disposable aufsng_test=1 VM.' >&2
++    exit 2
++fi
++WORK=$(mktemp -d /tmp/aufsng-ext4-root.XXXXXX)
++cleanup() {
++    result=$?
++    trap - EXIT
++    for path in nested union alias ext fold; do
++        if mountpoint -q "$WORK/$path"; then umount "$WORK/$path" || result=1; fi
++    done
++    if ! findmnt -rn -o TARGET | grep -Fq "$WORK/"; then rm -rf -- "$WORK"; fi
++    exit "$result"
++}
++trap cleanup EXIT
++mkdir -p "$WORK"/{nested,union,alias,ext,lower,upper,fold}
++truncate -s 128M "$WORK/ext4.img"
++mkfs.ext4 -F -q "$WORK/ext4.img"
++mount -t ext4 -o loop "$WORK/ext4.img" "$WORK/ext"
++printf 'lower\n' >"$WORK/lower/lower-file"
++printf 'ext4\n' >"$WORK/ext/ext4-file"
++mount -t aufs -o "br=$WORK/ext=rw:$WORK/lower=ro" aufs "$WORK/union"
++grep -qx lower "$WORK/union/lower-file"
++printf 'changed\n' >"$WORK/union/lower-file"
++grep -qx changed "$WORK/ext/lower-file"
++grep -qx lower "$WORK/lower/lower-file"
++rm "$WORK/union/lower-file"
++[ ! -e "$WORK/union/lower-file" ]
++[ -e "$WORK/ext/.wh.lower-file" ]
++umount "$WORK/union"
++echo 'PASS: ext4 filesystem root is writable upper with copy-up and whiteout'
++mount --bind "$WORK/ext" "$WORK/alias"
++mount -t aufs -o "br=$WORK/alias=rw" aufs "$WORK/union"
++grep -qx ext4 "$WORK/union/ext4-file"
++umount "$WORK/union"
++umount "$WORK/alias"
++echo 'PASS: bind-mounted ext4 filesystem root'
++mount -t aufs -o "br=$WORK/upper=rw:$WORK/ext=ro" aufs "$WORK/union"
++grep -qx ext4 "$WORK/union/ext4-file"
++umount "$WORK/union"
++echo 'PASS: ext4 filesystem root as read-only lower'
++mount -t aufs -o "br=$WORK/upper=rw" aufs "$WORK/union"
++mount -t aufs -o "remount,add=1:$WORK/ext=ro" aufs "$WORK/union"
++grep -qx ext4 "$WORK/union/ext4-file"
++mount -t aufs -o "remount,del=$WORK/ext" aufs "$WORK/union"
++[ ! -e "$WORK/union/ext4-file" ]
++umount "$WORK/union"
++echo 'PASS: ext4 filesystem root dynamic add and remove'
++mkdir "$WORK/ext/sub"
++mount -t aufs -o "br=$WORK/ext/sub=rw" aufs "$WORK/union"
++printf 'subdir\n' >"$WORK/union/probe"
++umount "$WORK/union"
++grep -qx subdir "$WORK/ext/sub/probe"
++echo 'PASS: ext4 subdirectory behavior unchanged'
++truncate -s 128M "$WORK/fold.img"
++mkfs.ext4 -F -q -O casefold "$WORK/fold.img"
++mount -t ext4 -o loop "$WORK/fold.img" "$WORK/fold"
++if mount -t aufs -o "br=$WORK/fold=rw" aufs "$WORK/union"; then
++    echo 'FAIL: casefold root was unexpectedly accepted' >&2; exit 1
++fi
++echo 'PASS: casefold root remains rejected'
++mount -t aufs -o "br=$WORK/upper=rw" aufs "$WORK/union"
++if mount -t aufs -o "br=$WORK/union=rw" aufs "$WORK/nested"; then
++    echo 'FAIL: revalidating AUFS root was unexpectedly accepted' >&2; exit 1
++fi
++umount "$WORK/union"
++echo 'PASS: non-fscrypt revalidating AUFS root remains rejected'
++printf 'EXT4_ROOT_%s_OK\n' REGRESSIONS

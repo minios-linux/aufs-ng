@@ -1,3 +1,14 @@
+aufs-ng (0~git20260807.842ab15-1minios3) unstable; urgency=medium
+
+  * Fix boot failure when a plain ext4 filesystem root is used as an AUFS
+    branch, including DynFileFS persistence containers.
+  * Keep other revalidation callbacks, encrypted names and casefold roots
+    outside the exception.
+  * Add VM regression coverage for ext4 root branches, copy-up, whiteouts,
+    dynamic branch changes and rejected revalidating/casefold roots.
+
+ -- crims0n <crims0n@minios.dev>  Thu, 10 Sep 2026 01:39:27 +0300
+
 aufs-ng (0~git20260807.842ab15-1minios2) unstable; urgency=medium
 
   * Allow dynamic branch removal to converge duplicate pinned directory

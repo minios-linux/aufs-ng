@@ -59,3 +59,17 @@ description unique — a failure's `TEST-FAIL:` marker is grepped
 verbatim by the host judge. Then bump **`TOTAL`** in `guest_main()`;
 the suite asserts `TOTAL` matches the number of checks actually run,
 so a stale count fails the run loudly rather than silently.
+
+## ext4 filesystem-root regression on a distribution kernel
+
+`ext4-root-vm.sh` checks the fscrypt-enabled ext4 root-dentry mount regression
+on a real distribution kernel. It is separate from the tmpfs-oriented UML
+suite and refuses to run unless the disposable VM has `aufsng_test=1` in its
+kernel command line. Run it as root only in that VM after loading the candidate
+module.
+
+It creates private temporary loop images and checks an ext4 root as upper,
+bind-mounted upper, static lower and dynamically added lower; copy-up and
+whiteouts; the existing subdirectory case; and rejection of casefold roots and
+AUFS roots with non-fscrypt revalidation callbacks. The helper does not install
+or replace a kernel module itself.
