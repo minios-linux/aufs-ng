@@ -1,0 +1,223 @@
+Description: Support revalidating local block-backed filesystem branches
+ Follow AUFS 6.12 in using FS_REQUIRES_DEV to distinguish local filesystems
+ from remote filesystems, and delegate to lower d_revalidate callbacks.
+ Keep custom name operations unsupported by aufs-ng.
+Origin: vendor
+Forwarded: no
+
+diff --git a/compat.h b/compat.h
+index ac910b8..2f13d7c 100644
+--- a/compat.h
++++ b/compat.h
+@@ -43,6 +43,17 @@ static int fn##_compat(struct dentry *dentry, unsigned int flags) \
+ #define AUFSNG_D_REVALIDATE_FN(fn) fn
+ #endif
+ 
++static inline int aufsng_lower_d_revalidate(struct dentry *dentry,
++					    unsigned int flags)
++{
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 14, 0)
++	return dentry->d_op->d_revalidate(dentry, flags);
++#else
++	return dentry->d_op->d_revalidate(d_inode(dentry->d_parent),
++					  &dentry->d_name, dentry, flags);
++#endif
++}
++
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(7, 0, 0)
+ #define inode_state_read_once(inode) READ_ONCE((inode)->i_state)
+ #define inode_state_read(inode) ((inode)->i_state)
+diff --git a/dcache.c b/dcache.c
+index 4367e03..2a573a5 100644
+--- a/dcache.c
++++ b/dcache.c
+@@ -66,6 +66,32 @@ static int aufsng_attrs_valid(struct inode *inode, struct inode *real,
+ 	return 1;
+ }
+ 
++static int aufsng_real_valid(struct dentry *dentry, unsigned int flags)
++{
++	if (!(dentry->d_flags & DCACHE_OP_REVALIDATE))
++		return 1;
++	return aufsng_lower_d_revalidate(dentry, flags);
++}
++
++static int aufsng_real_stack_valid(struct inode *inode, struct dentry *upper,
++				   struct aufsng_entry *oe, unsigned int flags)
++{
++	unsigned int i, numlower = oe ? oe->numlower : 0;
++	int valid;
++
++	if (upper) {
++		valid = aufsng_real_valid(upper, flags);
++		if (valid <= 0 || !d_is_dir(upper))
++			return valid;
++	}
++	for (i = 0; i < numlower; i++) {
++		valid = aufsng_real_valid(oe->lowerstack[i].dentry, flags);
++		if (valid <= 0 || !S_ISDIR(inode->i_mode))
++			return valid;
++	}
++	return 1;
++}
++
+ /*
+  * Does @upper carry @name in @dir's upper directory?  "The inode has an
+  * upper" is per-INODE (hardlink siblings share it); revalidation needs
+@@ -110,6 +136,10 @@ static int aufsng_positive_valid(struct inode *dir, const struct qstr *name,
+ 	int found;
+ 	int wh = 0;
+ 
++	ret = aufsng_real_stack_valid(inode, upper, oe, flags);
++	if (ret <= 0)
++		return ret;
++
+ 	/*
+ 	 * An out-of-band unlink/rename unhashes the pinned real dentry -
+ 	 * no lookup needed, RCU walk included.  Out-of-band signals are
+@@ -256,12 +286,13 @@ static int aufsng_d_revalidate(struct inode *dir, const struct qstr *name,
+ 	struct aufsng_fs *pfs = AUFSNG_FS(dentry->d_sb);
+ 
+ 	/*
+-	 * The root is never stale: its entry is swapped in place on a
+-	 * branch change.  udba=none trusts the cache out of band, as
+-	 * AUFS; the union's own branch changes are still honored.
++	 * The union root is swapped in place on a branch change, but a local
++	 * backing filesystem may still require its own root revalidation.
+ 	 */
+ 	if (unlikely(IS_ROOT(dentry)))
+-		return 1;
++		return aufsng_real_stack_valid(d_inode(dentry),
++					       aufsng_upperdentry(d_inode(dentry)),
++					       AUFSNG_I_E(d_inode(dentry)), flags);
+ 
+ 	if (d_is_negative(dentry)) {
+ 		unsigned long stamp;
+diff --git a/super.c b/super.c
+index 9af0146..8c108ae 100644
+--- a/super.c
++++ b/super.c
+@@ -7,7 +7,6 @@
+ 
+ #include <linux/module.h>
+ #include <linux/fs.h>
+-#include <linux/fscrypt.h>
+ #include <linux/fs_context.h>
+ #include <linux/mount.h>
+ #include <linux/namei.h>
+@@ -302,26 +301,21 @@ int aufsng_check_layer(struct super_block *sb, const struct path *path,
+ 	struct dentry *dentry = path->dentry;
+ 	unsigned int flags = dentry->d_flags;
+ 
+-#if IS_ENABLED(CONFIG_FS_ENCRYPTION)
+ 	/*
+-	 * ext4 installs fscrypt_d_revalidate on its filesystem root even
+-	 * without encryption. Plaintext names always validate successfully;
+-	 * unlike remote-fs callbacks, this is not external namespace state.
+-	 * Keep no-key, encrypted, casefold and weak-revalidation cases out.
+-	 * Only filter our local test; never change the backing dentry flags.
++	 * As in AUFS 6.12, FS_REQUIRES_DEV distinguishes local block-backed
++	 * filesystems from remote filesystems.  Local filesystems may install
++	 * revalidation callbacks too; dcache.c delegates to those callbacks.
+ 	 */
+-	if (dentry == dentry->d_sb->s_root && dentry->d_op &&
+-	    dentry->d_op->d_revalidate == fscrypt_d_revalidate &&
+-	    d_is_dir(dentry) && !IS_ENCRYPTED(d_inode(dentry)) &&
+-	    !(flags & (DCACHE_NOKEY_NAME | DCACHE_OP_HASH | DCACHE_OP_COMPARE)))
+-		flags &= ~DCACHE_OP_REVALIDATE;
+-#endif
+ 	if (!d_is_dir(path->dentry)) {
+ 		pr_err("aufs: %s is not a directory\n", name);
+ 		return -ENOTDIR;
+ 	}
+-	/* Branches needing dentry revalidation (remote fs) are unsupported */
+-	if (flags & (DCACHE_OP_REVALIDATE | DCACHE_OP_WEAK_REVALIDATE)) {
++	if (flags & (DCACHE_NOKEY_NAME | DCACHE_OP_HASH | DCACHE_OP_COMPARE)) {
++		pr_err("aufs: %s uses unsupported custom name operations\n", name);
++		return -EINVAL;
++	}
++	if ((flags & (DCACHE_OP_REVALIDATE | DCACHE_OP_WEAK_REVALIDATE)) &&
++	    !(dentry->d_sb->s_type->fs_flags & FS_REQUIRES_DEV)) {
+ 		pr_err("aufs: %s is on a remote filesystem, not supported\n",
+ 		       name);
+ 		return -EINVAL;
+diff --git a/tests/README.md b/tests/README.md
+index 19601f2..345879a 100644
+--- a/tests/README.md
++++ b/tests/README.md
+@@ -60,16 +60,15 @@ verbatim by the host judge. Then bump **`TOTAL`** in `guest_main()`;
+ the suite asserts `TOTAL` matches the number of checks actually run,
+ so a stale count fails the run loudly rather than silently.
+ 
+-## ext4 filesystem-root regression on a distribution kernel
+-
+-`ext4-root-vm.sh` checks the fscrypt-enabled ext4 root-dentry mount regression
+-on a real distribution kernel. It is separate from the tmpfs-oriented UML
+-suite and refuses to run unless the disposable VM has `aufsng_test=1` in its
+-kernel command line. Run it as root only in that VM after loading the candidate
+-module.
+-
+-It creates private temporary loop images and checks an ext4 root as upper,
+-bind-mounted upper, static lower and dynamically added lower; copy-up and
+-whiteouts; the existing subdirectory case; and rejection of casefold roots and
+-AUFS roots with non-fscrypt revalidation callbacks. The helper does not install
+-or replace a kernel module itself.
++## Local filesystem-root regression on a distribution kernel
++
++`ext4-root-vm.sh` checks local block-backed filesystem roots on a real
++distribution kernel. It is separate from the tmpfs-oriented UML suite and
++refuses to run unless the disposable VM has `aufsng_test=1` in its kernel
++command line. Run it as root only in that VM after loading the candidate module.
++
++It creates private temporary loop images and checks ext4, ext2 and, when
++`mkfs.btrfs` is installed, Btrfs roots. The ext4 checks also cover bind-mounted,
++static and dynamically added branches, copy-up and whiteouts. Casefold roots
++and AUFS roots remain rejected. The helper does not install or replace a kernel
++module itself.
+diff --git a/tests/ext4-root-vm.sh b/tests/ext4-root-vm.sh
+index 1f54715..9ffe072 100644
+--- a/tests/ext4-root-vm.sh
++++ b/tests/ext4-root-vm.sh
+@@ -9,14 +9,27 @@ WORK=$(mktemp -d /tmp/aufsng-ext4-root.XXXXXX)
+ cleanup() {
+     result=$?
+     trap - EXIT
+-    for path in nested union alias ext fold; do
++    for path in nested union alias ext ext2 btrfs fold; do
+         if mountpoint -q "$WORK/$path"; then umount "$WORK/$path" || result=1; fi
+     done
+     if ! findmnt -rn -o TARGET | grep -Fq "$WORK/"; then rm -rf -- "$WORK"; fi
+     exit "$result"
+ }
+ trap cleanup EXIT
+-mkdir -p "$WORK"/{nested,union,alias,ext,lower,upper,fold}
++mkdir -p "$WORK"/{nested,union,alias,ext,ext2,btrfs,lower,upper,fold}
++test_local_root() {
++    fs=$1
++    shift
++    truncate -s 256M "$WORK/$fs.img"
++    "$@" "$WORK/$fs.img"
++    mount -t "$fs" -o loop "$WORK/$fs.img" "$WORK/$fs"
++    mount -t aufs -o "br=$WORK/$fs=rw" aufs "$WORK/union"
++    printf '%s\n' "$fs" >"$WORK/union/probe"
++    grep -qx "$fs" "$WORK/$fs/probe"
++    umount "$WORK/union"
++    umount "$WORK/$fs"
++    echo "PASS: $fs filesystem root is a writable local branch"
++}
+ truncate -s 128M "$WORK/ext4.img"
+ mkfs.ext4 -F -q "$WORK/ext4.img"
+ mount -t ext4 -o loop "$WORK/ext4.img" "$WORK/ext"
+@@ -55,6 +68,12 @@ printf 'subdir\n' >"$WORK/union/probe"
+ umount "$WORK/union"
+ grep -qx subdir "$WORK/ext/sub/probe"
+ echo 'PASS: ext4 subdirectory behavior unchanged'
++test_local_root ext2 mkfs.ext2 -F -q
++if command -v mkfs.btrfs >/dev/null; then
++    test_local_root btrfs mkfs.btrfs -f -q
++else
++    echo 'SKIP: mkfs.btrfs is unavailable'
++fi
+ truncate -s 128M "$WORK/fold.img"
+ mkfs.ext4 -F -q -O casefold "$WORK/fold.img"
+ mount -t ext4 -o loop "$WORK/fold.img" "$WORK/fold"

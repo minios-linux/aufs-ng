@@ -9,14 +9,27 @@ WORK=$(mktemp -d /tmp/aufsng-ext4-root.XXXXXX)
 cleanup() {
     result=$?
     trap - EXIT
-    for path in nested union alias ext fold; do
+    for path in nested union alias ext ext2 btrfs fold; do
         if mountpoint -q "$WORK/$path"; then umount "$WORK/$path" || result=1; fi
     done
     if ! findmnt -rn -o TARGET | grep -Fq "$WORK/"; then rm -rf -- "$WORK"; fi
     exit "$result"
 }
 trap cleanup EXIT
-mkdir -p "$WORK"/{nested,union,alias,ext,lower,upper,fold}
+mkdir -p "$WORK"/{nested,union,alias,ext,ext2,btrfs,lower,upper,fold}
+test_local_root() {
+    fs=$1
+    shift
+    truncate -s 256M "$WORK/$fs.img"
+    "$@" "$WORK/$fs.img"
+    mount -t "$fs" -o loop "$WORK/$fs.img" "$WORK/$fs"
+    mount -t aufs -o "br=$WORK/$fs=rw" aufs "$WORK/union"
+    printf '%s\n' "$fs" >"$WORK/union/probe"
+    grep -qx "$fs" "$WORK/$fs/probe"
+    umount "$WORK/union"
+    umount "$WORK/$fs"
+    echo "PASS: $fs filesystem root is a writable local branch"
+}
 truncate -s 128M "$WORK/ext4.img"
 mkfs.ext4 -F -q "$WORK/ext4.img"
 mount -t ext4 -o loop "$WORK/ext4.img" "$WORK/ext"
@@ -55,6 +68,12 @@ printf 'subdir\n' >"$WORK/union/probe"
 umount "$WORK/union"
 grep -qx subdir "$WORK/ext/sub/probe"
 echo 'PASS: ext4 subdirectory behavior unchanged'
+test_local_root ext2 mkfs.ext2 -F -q
+if command -v mkfs.btrfs >/dev/null; then
+    test_local_root btrfs mkfs.btrfs -f -q
+else
+    echo 'SKIP: mkfs.btrfs is unavailable'
+fi
 truncate -s 128M "$WORK/fold.img"
 mkfs.ext4 -F -q -O casefold "$WORK/fold.img"
 mount -t ext4 -o loop "$WORK/fold.img" "$WORK/fold"

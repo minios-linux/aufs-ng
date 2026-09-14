@@ -43,6 +43,17 @@ static int fn##_compat(struct dentry *dentry, unsigned int flags) \
 #define AUFSNG_D_REVALIDATE_FN(fn) fn
 #endif
 
+static inline int aufsng_lower_d_revalidate(struct dentry *dentry,
+					    unsigned int flags)
+{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 14, 0)
+	return dentry->d_op->d_revalidate(dentry, flags);
+#else
+	return dentry->d_op->d_revalidate(d_inode(dentry->d_parent),
+					  &dentry->d_name, dentry, flags);
+#endif
+}
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(7, 0, 0)
 #define inode_state_read_once(inode) READ_ONCE((inode)->i_state)
 #define inode_state_read(inode) ((inode)->i_state)

@@ -60,16 +60,15 @@ verbatim by the host judge. Then bump **`TOTAL`** in `guest_main()`;
 the suite asserts `TOTAL` matches the number of checks actually run,
 so a stale count fails the run loudly rather than silently.
 
-## ext4 filesystem-root regression on a distribution kernel
+## Local filesystem-root regression on a distribution kernel
 
-`ext4-root-vm.sh` checks the fscrypt-enabled ext4 root-dentry mount regression
-on a real distribution kernel. It is separate from the tmpfs-oriented UML
-suite and refuses to run unless the disposable VM has `aufsng_test=1` in its
-kernel command line. Run it as root only in that VM after loading the candidate
-module.
+`ext4-root-vm.sh` checks local block-backed filesystem roots on a real
+distribution kernel. It is separate from the tmpfs-oriented UML suite and
+refuses to run unless the disposable VM has `aufsng_test=1` in its kernel
+command line. Run it as root only in that VM after loading the candidate module.
 
-It creates private temporary loop images and checks an ext4 root as upper,
-bind-mounted upper, static lower and dynamically added lower; copy-up and
-whiteouts; the existing subdirectory case; and rejection of casefold roots and
-AUFS roots with non-fscrypt revalidation callbacks. The helper does not install
-or replace a kernel module itself.
+It creates private temporary loop images and checks ext4, ext2 and, when
+`mkfs.btrfs` is installed, Btrfs roots. The ext4 checks also cover bind-mounted,
+static and dynamically added branches, copy-up and whiteouts. Casefold roots
+and AUFS roots remain rejected. The helper does not install or replace a kernel
+module itself.
