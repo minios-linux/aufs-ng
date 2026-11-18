@@ -1,4 +1,2 @@
 0001-add-linux-6.12-compatibility.patch
-0002-handle-pinned-directory-generations.patch
-0003-allow-plaintext-ext4-root.patch
-0004-support-local-revalidating-filesystems.patch
+0002-support-local-revalidating-filesystems.patch

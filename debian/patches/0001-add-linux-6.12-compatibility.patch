@@ -1,33 +1,25 @@
-Description: add Linux 6.12 compatibility
- Backport aufs-ng to Linux 6.12 while keeping newer-kernel support. Kernel API
- differences are isolated in compat.h, including the two backing_file_open()
- ABIs present across the 6.12 stable series.
-Author: MiniOS Linux Team <crims0n@minios.dev>
-Forwarded: not-yet
-Last-Update: 2026-08-29
-
 diff --git a/README.md b/README.md
-index 20654f3..a3898a0 100644
+index 20c3f57..bb335f5 100644
 --- a/README.md
 +++ b/README.md
-@@ -145,8 +145,10 @@ Also, some `aufs` features are intentionally out of scope:
+@@ -142,6 +142,12 @@ Also, some `aufs` features are intentionally out of scope:
  
- ## Building
+ ## Building (64-bit only)
  
--Needs a **64-bit** kernel: inode numbers carry the layer a file came
--from in their high bits, which a 32-bit inode number cannot hold.
-+Needs a **64-bit Linux 6.12 or later** kernel: inode numbers carry the
-+layer a file came from in their high bits, which a 32-bit inode number
-+cannot hold. Kernel API differences from 6.12 onward are isolated in
-+`compat.h` so the filesystem code stays version-independent.
++The MiniOS compatibility layer supports Linux 6.12 and later.
++Kernel API differences are handled in `compat.h`.
++
++For live-boot, `CONFIG_AUFSNG_FS=y` is recommended, since the filesystem
++may be required before a loadable module is reachable.
++
+ To integrate into a kernel source tree (any anchor line in `fs/Kconfig`/
+ `fs/Makefile` works; the `OverlayFS` entry is just a convenient, stable one):
  
- Best built **into the kernel** (`CONFIG_AUFSNG_FS=y`) as a live-boot
- sequence typically needs this filesystem type mounted before any
 diff --git a/compat.h b/compat.h
-index 1f328fa..ac910b8 100644
+index e7f0e8d..8a79b11 100644
 --- a/compat.h
 +++ b/compat.h
-@@ -7,9 +7,527 @@
+@@ -7,15 +7,10 @@
  #define AUFSNG_COMPAT_H
  
  #include <linux/version.h>
@@ -35,10 +27,21 @@ index 1f328fa..ac910b8 100644
  
 -#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 1, 0)
 -#error "aufs-ng supports kernel 7.1 and later"
+-#endif
+-
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+-#define AUFSNG_CREATE_EXCL
+-#else
+-#define AUFSNG_CREATE_EXCL , bool excl
 +#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 +#error "aufs-ng supports kernel 6.12 and later"
-+#endif
-+
+ #endif
+ 
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 4, 0)
+@@ -24,4 +19,527 @@
+ #define AUFSNG_IDMAP struct mnt_idmap
+ #endif
+ 
 +#ifndef QSTR_LEN
 +#define QSTR_LEN(n, l) ((struct qstr)QSTR_INIT(n, l))
 +#endif
@@ -476,27 +479,27 @@ index 1f328fa..ac910b8 100644
 +	dput(rd->new_dentry);
 +}
 +#else
-+static inline int aufsng_vfs_create(struct mnt_idmap *idmap,
++static inline int aufsng_vfs_create(AUFSNG_IDMAP *idmap,
 +				    struct dentry *dentry, umode_t mode)
 +{
 +	return vfs_create(idmap, dentry, mode, NULL);
 +}
 +
 +static inline struct dentry *
-+aufsng_vfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
++aufsng_vfs_mkdir(AUFSNG_IDMAP *idmap, struct inode *dir,
 +		 struct dentry *dentry, umode_t mode)
 +{
 +	return vfs_mkdir(idmap, dir, dentry, mode, NULL);
 +}
 +
-+static inline int aufsng_vfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
++static inline int aufsng_vfs_mknod(AUFSNG_IDMAP *idmap, struct inode *dir,
 +				   struct dentry *dentry, umode_t mode,
 +				   dev_t dev)
 +{
 +	return vfs_mknod(idmap, dir, dentry, mode, dev, NULL);
 +}
 +
-+static inline int aufsng_vfs_symlink(struct mnt_idmap *idmap,
++static inline int aufsng_vfs_symlink(AUFSNG_IDMAP *idmap,
 +				     struct inode *dir,
 +				     struct dentry *dentry,
 +				     const char *oldname)
@@ -504,14 +507,14 @@ index 1f328fa..ac910b8 100644
 +	return vfs_symlink(idmap, dir, dentry, oldname, NULL);
 +}
 +
-+static inline int aufsng_vfs_rmdir(struct mnt_idmap *idmap, struct inode *dir,
++static inline int aufsng_vfs_rmdir(AUFSNG_IDMAP *idmap, struct inode *dir,
 +				   struct dentry *dentry)
 +{
 +	return vfs_rmdir(idmap, dir, dentry, NULL);
 +}
 +
 +static inline int
-+aufsng_start_renaming(struct renamedata *rd, struct mnt_idmap *idmap,
++aufsng_start_renaming(struct renamedata *rd, AUFSNG_IDMAP *idmap,
 +		      struct dentry *old_parent, struct dentry *new_parent,
 +		      int lookup_flags, struct qstr *old_last,
 +		      struct qstr *new_last)
@@ -523,7 +526,7 @@ index 1f328fa..ac910b8 100644
 +}
 +
 +static inline int
-+aufsng_start_renaming_dentry(struct renamedata *rd, struct mnt_idmap *idmap,
++aufsng_start_renaming_dentry(struct renamedata *rd, AUFSNG_IDMAP *idmap,
 +			     struct dentry *old_parent,
 +			     struct dentry *new_parent, int lookup_flags,
 +			     struct dentry *old_dentry,
@@ -554,11 +557,17 @@ index 1f328fa..ac910b8 100644
 +
 +#define lookup_one_positive_unlocked(idmap, name, base) \
 +	aufsng_lookup_one_positive_unlocked(idmap, name, base)
- #endif
- 
++#endif
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
++#define AUFSNG_CREATE_EXCL
++#else
++#define AUFSNG_CREATE_EXCL , bool excl
++#endif
++
  #endif /* AUFSNG_COMPAT_H */
 diff --git a/copy_up.c b/copy_up.c
-index d358f81..7b3a9ed 100644
+index 9d048ff..72eb9b1 100644
 --- a/copy_up.c
 +++ b/copy_up.c
 @@ -266,7 +266,7 @@ static struct dentry *aufsng_copy_up_prep_regular(struct aufsng_fs *pfs,
@@ -627,7 +636,7 @@ index d358f81..7b3a9ed 100644
  			goto out_end;
  		break;
 diff --git a/dcache.c b/dcache.c
-index c9f55c1..4367e03 100644
+index a2c1454..250a34e 100644
 --- a/dcache.c
 +++ b/dcache.c
 @@ -289,6 +289,8 @@ static int aufsng_d_revalidate(struct inode *dir, const struct qstr *name,
@@ -641,7 +650,7 @@ index c9f55c1..4367e03 100644
 +	.d_revalidate		= AUFSNG_D_REVALIDATE_FN(aufsng_d_revalidate),
  };
 diff --git a/dir.c b/dir.c
-index 1652d06..08f659c 100644
+index 4cdb165..4cb487b 100644
 --- a/dir.c
 +++ b/dir.c
 @@ -60,7 +60,7 @@ static int aufsng_create_marker(struct aufsng_fs *pfs, struct dentry *upperdir,
@@ -708,7 +717,7 @@ index 1652d06..08f659c 100644
  		break;
  	}
  	if (err) {
-@@ -891,9 +888,6 @@ int aufsng_rename(struct mnt_idmap *idmap, struct inode *olddir,
+@@ -891,9 +888,6 @@ int aufsng_rename(AUFSNG_IDMAP *idmap, struct inode *olddir,
  		}
  	}
  
@@ -718,7 +727,7 @@ index 1652d06..08f659c 100644
  	rd.flags = flags;
  	{
  		struct qstr oldq = QSTR_LEN(old->d_name.name,
-@@ -901,12 +895,13 @@ int aufsng_rename(struct mnt_idmap *idmap, struct inode *olddir,
+@@ -901,12 +895,13 @@ int aufsng_rename(AUFSNG_IDMAP *idmap, struct inode *olddir,
  		struct qstr newq = QSTR_LEN(new->d_name.name,
  					    new->d_name.len);
  
@@ -735,7 +744,7 @@ index 1652d06..08f659c 100644
  	if (err)
  		goto out_unpark;
 diff --git a/file.c b/file.c
-index 40fcd19..6dc35fc 100644
+index 8e2af7e..df5254d 100644
 --- a/file.c
 +++ b/file.c
 @@ -23,16 +23,19 @@ static void aufsng_file_accessed(struct file *file)
@@ -847,10 +856,10 @@ index 40fcd19..6dc35fc 100644
  
  static int aufsng_fsync(struct file *file, loff_t start, loff_t end,
 diff --git a/inode.c b/inode.c
-index 55f24a5..c1f6622 100644
+index bdef456..f7d6f5b 100644
 --- a/inode.c
 +++ b/inode.c
-@@ -25,7 +25,7 @@ static int aufsng_getattr(struct mnt_idmap *idmap, const struct path *path,
+@@ -25,7 +25,7 @@ static int aufsng_getattr(AUFSNG_IDMAP *idmap, const struct path *path,
  
  	aufsng_path_real(inode, &realpath);
  	old_cred = override_creds(pfs->creator_cred);
@@ -874,7 +883,7 @@ index 55f24a5..c1f6622 100644
  	.symlink	= aufsng_symlink,
  	.link		= aufsng_link,
 diff --git a/readdir.c b/readdir.c
-index 1d9ca52..7ff9d95 100644
+index a6fa75d..1192dd9 100644
 --- a/readdir.c
 +++ b/readdir.c
 @@ -24,7 +24,6 @@
@@ -895,7 +904,7 @@ index 1d9ca52..7ff9d95 100644
  		.idx = idx,
  	};
 @@ -768,7 +767,7 @@ int aufsng_clear_whiteouts(struct aufsng_fs *pfs, struct dentry *upperdir)
- 	struct mnt_idmap *idmap = mnt_idmap(aufsng_upper_mnt(pfs));
+ 	AUFSNG_IDMAP *idmap = mnt_idmap(aufsng_upper_mnt(pfs));
  	struct aufsng_wh_sweep sw = {
  		.dd.ctx.actor = aufsng_wh_sweep_actor,
 -		.dd.ctx.count = INT_MAX,
@@ -914,3 +923,69 @@ index 1d9ca52..7ff9d95 100644
  				else
  					e = vfs_unlink(idmap,
  						       d_inode(upperdir),
+diff --git a/super.c b/super.c
+index 30d78c4..ffc7c51 100644
+--- a/super.c
++++ b/super.c
+@@ -7,6 +7,7 @@
+ 
+ #include <linux/module.h>
+ #include <linux/fs.h>
++#include <linux/fscrypt.h>
+ #include <linux/fs_context.h>
+ #include <linux/mount.h>
+ #include <linux/namei.h>
+@@ -298,13 +299,29 @@ const struct super_operations aufsng_super_operations = {
+ int aufsng_check_layer(struct super_block *sb, const struct path *path,
+ 		    const char *name)
+ {
++	struct dentry *dentry = path->dentry;
++	unsigned int flags = dentry->d_flags;
++
++#if IS_ENABLED(CONFIG_FS_ENCRYPTION)
++	/*
++	 * ext4 installs fscrypt_d_revalidate on its filesystem root even
++	 * without encryption. Plaintext names always validate successfully;
++	 * unlike remote-fs callbacks, this is not external namespace state.
++	 * Keep no-key, encrypted, casefold and weak-revalidation cases out.
++	 * Only filter our local test; never change the backing dentry flags.
++	 */
++	if (dentry == dentry->d_sb->s_root && dentry->d_op &&
++	    dentry->d_op->d_revalidate == fscrypt_d_revalidate &&
++	    d_is_dir(dentry) && !IS_ENCRYPTED(d_inode(dentry)) &&
++	    !(flags & (DCACHE_NOKEY_NAME | DCACHE_OP_HASH | DCACHE_OP_COMPARE)))
++		flags &= ~DCACHE_OP_REVALIDATE;
++#endif
+ 	if (!d_is_dir(path->dentry)) {
+ 		pr_err("aufs: %s is not a directory\n", name);
+ 		return -ENOTDIR;
+ 	}
+ 	/* Branches needing dentry revalidation (remote fs) are unsupported */
+-	if (path->dentry->d_flags & (DCACHE_OP_REVALIDATE |
+-				     DCACHE_OP_WEAK_REVALIDATE)) {
++	if (flags & (DCACHE_OP_REVALIDATE | DCACHE_OP_WEAK_REVALIDATE)) {
+ 		pr_err("aufs: %s is on a remote filesystem, not supported\n",
+ 		       name);
+ 		return -EINVAL;
+diff --git a/tests/README.md b/tests/README.md
+index 6a5a32a..19601f2 100644
+--- a/tests/README.md
++++ b/tests/README.md
+@@ -59,3 +59,17 @@ description unique — a failure's `TEST-FAIL:` marker is grepped
+ verbatim by the host judge. Then bump **`TOTAL`** in `guest_main()`;
+ the suite asserts `TOTAL` matches the number of checks actually run,
+ so a stale count fails the run loudly rather than silently.
++
++## ext4 filesystem-root regression on a distribution kernel
++
++`ext4-root-vm.sh` checks the fscrypt-enabled ext4 root-dentry mount regression
++on a real distribution kernel. It is separate from the tmpfs-oriented UML
++suite and refuses to run unless the disposable VM has `aufsng_test=1` in its
++kernel command line. Run it as root only in that VM after loading the candidate
++module.
++
++It creates private temporary loop images and checks an ext4 root as upper,
++bind-mounted upper, static lower and dynamically added lower; copy-up and
++whiteouts; the existing subdirectory case; and rejection of casefold roots and
++AUFS roots with non-fscrypt revalidation callbacks. The helper does not install
++or replace a kernel module itself.

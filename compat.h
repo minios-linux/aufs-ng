@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0-only */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Kernel-version shims.  Every LINUX_VERSION_CODE guard lives here so
  * version churn stays out of the filesystem code.
@@ -11,6 +11,12 @@
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 #error "aufs-ng supports kernel 6.12 and later"
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 4, 0)
+#define AUFSNG_IDMAP const struct mnt_idmap
+#else
+#define AUFSNG_IDMAP struct mnt_idmap
 #endif
 
 #ifndef QSTR_LEN
@@ -461,27 +467,27 @@ static inline void aufsng_end_renaming(struct renamedata *rd,
 	dput(rd->new_dentry);
 }
 #else
-static inline int aufsng_vfs_create(struct mnt_idmap *idmap,
+static inline int aufsng_vfs_create(AUFSNG_IDMAP *idmap,
 				    struct dentry *dentry, umode_t mode)
 {
 	return vfs_create(idmap, dentry, mode, NULL);
 }
 
 static inline struct dentry *
-aufsng_vfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+aufsng_vfs_mkdir(AUFSNG_IDMAP *idmap, struct inode *dir,
 		 struct dentry *dentry, umode_t mode)
 {
 	return vfs_mkdir(idmap, dir, dentry, mode, NULL);
 }
 
-static inline int aufsng_vfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
+static inline int aufsng_vfs_mknod(AUFSNG_IDMAP *idmap, struct inode *dir,
 				   struct dentry *dentry, umode_t mode,
 				   dev_t dev)
 {
 	return vfs_mknod(idmap, dir, dentry, mode, dev, NULL);
 }
 
-static inline int aufsng_vfs_symlink(struct mnt_idmap *idmap,
+static inline int aufsng_vfs_symlink(AUFSNG_IDMAP *idmap,
 				     struct inode *dir,
 				     struct dentry *dentry,
 				     const char *oldname)
@@ -489,14 +495,14 @@ static inline int aufsng_vfs_symlink(struct mnt_idmap *idmap,
 	return vfs_symlink(idmap, dir, dentry, oldname, NULL);
 }
 
-static inline int aufsng_vfs_rmdir(struct mnt_idmap *idmap, struct inode *dir,
+static inline int aufsng_vfs_rmdir(AUFSNG_IDMAP *idmap, struct inode *dir,
 				   struct dentry *dentry)
 {
 	return vfs_rmdir(idmap, dir, dentry, NULL);
 }
 
 static inline int
-aufsng_start_renaming(struct renamedata *rd, struct mnt_idmap *idmap,
+aufsng_start_renaming(struct renamedata *rd, AUFSNG_IDMAP *idmap,
 		      struct dentry *old_parent, struct dentry *new_parent,
 		      int lookup_flags, struct qstr *old_last,
 		      struct qstr *new_last)
@@ -508,7 +514,7 @@ aufsng_start_renaming(struct renamedata *rd, struct mnt_idmap *idmap,
 }
 
 static inline int
-aufsng_start_renaming_dentry(struct renamedata *rd, struct mnt_idmap *idmap,
+aufsng_start_renaming_dentry(struct renamedata *rd, AUFSNG_IDMAP *idmap,
 			     struct dentry *old_parent,
 			     struct dentry *new_parent, int lookup_flags,
 			     struct dentry *old_dentry,
@@ -539,6 +545,12 @@ aufsng_lookup_one_positive_unlocked(struct mnt_idmap *idmap,
 
 #define lookup_one_positive_unlocked(idmap, name, base) \
 	aufsng_lookup_one_positive_unlocked(idmap, name, base)
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+#define AUFSNG_CREATE_EXCL
+#else
+#define AUFSNG_CREATE_EXCL , bool excl
 #endif
 
 #endif /* AUFSNG_COMPAT_H */

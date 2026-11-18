@@ -58,11 +58,6 @@ benchmarks.
 
 ## Usage
 
-A union shows several folders as if they were one. The first is writable
-and takes everything you create, change or delete; the rest are read-only
-and only provide content. When the same name exists in more than one, the
-first one listed wins. The mount options call such a folder a branch.
-
 ```
 mount -t aufs -o br:/memory/changes=rw,udba=reval aufs /union
 mount -o remount,add=1:/path/to/layer=ro aufs /union   # add a layer
@@ -145,16 +140,13 @@ Also, some `aufs` features are intentionally out of scope:
 - **FHSM** (automatic storage tiering) — not needed: `aufs-ng` only ever
   has one writable location, so there's nothing to move files between.
 
-## Building
+## Building (64-bit only)
 
-Needs a **64-bit Linux 6.12 or later** kernel: inode numbers carry the
-layer a file came from in their high bits, which a 32-bit inode number
-cannot hold. Kernel API differences from 6.12 onward are isolated in
-`compat.h` so the filesystem code stays version-independent.
+The MiniOS compatibility layer supports Linux 6.12 and later.
+Kernel API differences are handled in `compat.h`.
 
-Best built **into the kernel** (`CONFIG_AUFSNG_FS=y`) as a live-boot
-sequence typically needs this filesystem type mounted before any
-loadable module can be reached at all.
+For live-boot, `CONFIG_AUFSNG_FS=y` is recommended, since the filesystem
+may be required before a loadable module is reachable.
 
 To integrate into a kernel source tree (any anchor line in `fs/Kconfig`/
 `fs/Makefile` works; the `OverlayFS` entry is just a convenient, stable one):
@@ -166,7 +158,11 @@ sed -i '/obj-\$(CONFIG_OVERLAY_FS)\s*+= overlayfs\//a obj-$(CONFIG_AUFSNG_FS)\t+
 echo "CONFIG_AUFSNG_FS=y" >> .config
 ```
 
-Then build the kernel as usual.
+Then build the kernel as usual. 
+
+For a live-boot system it's recommend to use `CONFIG_AUFSNG_FS=y` (instead
+of `CONFIG_AUFSNG_FS=m`) because the filesystem is mounted before any
+loadable module can be reached.
 
 For a quick out-of-tree test build against an already-built kernel tree
 (producing a loadable `.ko` instead, no `fs/Kconfig`/`fs/Makefile` edits
@@ -185,6 +181,5 @@ on an already-running union.
 ## License
 
 `aufs-ng` is free software, released under the **GNU General Public
-License, version 2** (`GPL-2.0-only`) — the same license as the Linux
-kernel it builds against, so the project is fully GPL-friendly and can
-be distributed as part of a GPL kernel tree.
+License, version 2 or later** (`GPL-2.0-or-later`). See
+[COPYING](COPYING) (GPL 2) and [LICENSE](LICENSE) (GPL 3).

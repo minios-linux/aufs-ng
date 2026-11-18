@@ -1,12 +1,5 @@
-Description: Support revalidating local block-backed filesystem branches
- Follow AUFS 6.12 in using FS_REQUIRES_DEV to distinguish local filesystems
- from remote filesystems, and delegate to lower d_revalidate callbacks.
- Keep custom name operations unsupported by aufs-ng.
-Origin: vendor
-Forwarded: no
-
 diff --git a/compat.h b/compat.h
-index ac910b8..2f13d7c 100644
+index 21dc1b2..6bf2f31 100644
 --- a/compat.h
 +++ b/compat.h
 @@ -43,6 +43,17 @@ static int fn##_compat(struct dentry *dentry, unsigned int flags) \
@@ -28,7 +21,7 @@ index ac910b8..2f13d7c 100644
  #define inode_state_read_once(inode) READ_ONCE((inode)->i_state)
  #define inode_state_read(inode) ((inode)->i_state)
 diff --git a/dcache.c b/dcache.c
-index 4367e03..2a573a5 100644
+index 250a34e..065b76b 100644
 --- a/dcache.c
 +++ b/dcache.c
 @@ -66,6 +66,32 @@ static int aufsng_attrs_valid(struct inode *inode, struct inode *real,
@@ -94,7 +87,7 @@ index 4367e03..2a573a5 100644
  	if (d_is_negative(dentry)) {
  		unsigned long stamp;
 diff --git a/super.c b/super.c
-index 9af0146..8c108ae 100644
+index ffc7c51..8d9e18c 100644
 --- a/super.c
 +++ b/super.c
 @@ -7,7 +7,6 @@
@@ -175,22 +168,28 @@ index 19601f2..345879a 100644
 +and AUFS roots remain rejected. The helper does not install or replace a kernel
 +module itself.
 diff --git a/tests/ext4-root-vm.sh b/tests/ext4-root-vm.sh
-index 1f54715..9ffe072 100644
---- a/tests/ext4-root-vm.sh
+new file mode 100644
+--- /dev/null
 +++ b/tests/ext4-root-vm.sh
-@@ -9,14 +9,27 @@ WORK=$(mktemp -d /tmp/aufsng-ext4-root.XXXXXX)
- cleanup() {
-     result=$?
-     trap - EXIT
--    for path in nested union alias ext fold; do
+@@ -0,0 +1,90 @@
++#!/bin/bash
++# Run only in a disposable Testo VM booted with aufsng_test=1.
++set -euo pipefail
++if [ "${EUID}" != 0 ] || ! grep -qw aufsng_test=1 /proc/cmdline; then
++    echo 'Requires root inside a disposable aufsng_test=1 VM.' >&2
++    exit 2
++fi
++WORK=$(mktemp -d /tmp/aufsng-ext4-root.XXXXXX)
++cleanup() {
++    result=$?
++    trap - EXIT
 +    for path in nested union alias ext ext2 btrfs fold; do
-         if mountpoint -q "$WORK/$path"; then umount "$WORK/$path" || result=1; fi
-     done
-     if ! findmnt -rn -o TARGET | grep -Fq "$WORK/"; then rm -rf -- "$WORK"; fi
-     exit "$result"
- }
- trap cleanup EXIT
--mkdir -p "$WORK"/{nested,union,alias,ext,lower,upper,fold}
++        if mountpoint -q "$WORK/$path"; then umount "$WORK/$path" || result=1; fi
++    done
++    if ! findmnt -rn -o TARGET | grep -Fq "$WORK/"; then rm -rf -- "$WORK"; fi
++    exit "$result"
++}
++trap cleanup EXIT
 +mkdir -p "$WORK"/{nested,union,alias,ext,ext2,btrfs,lower,upper,fold}
 +test_local_root() {
 +    fs=$1
@@ -205,19 +204,61 @@ index 1f54715..9ffe072 100644
 +    umount "$WORK/$fs"
 +    echo "PASS: $fs filesystem root is a writable local branch"
 +}
- truncate -s 128M "$WORK/ext4.img"
- mkfs.ext4 -F -q "$WORK/ext4.img"
- mount -t ext4 -o loop "$WORK/ext4.img" "$WORK/ext"
-@@ -55,6 +68,12 @@ printf 'subdir\n' >"$WORK/union/probe"
- umount "$WORK/union"
- grep -qx subdir "$WORK/ext/sub/probe"
- echo 'PASS: ext4 subdirectory behavior unchanged'
++truncate -s 128M "$WORK/ext4.img"
++mkfs.ext4 -F -q "$WORK/ext4.img"
++mount -t ext4 -o loop "$WORK/ext4.img" "$WORK/ext"
++printf 'lower\n' >"$WORK/lower/lower-file"
++printf 'ext4\n' >"$WORK/ext/ext4-file"
++mount -t aufs -o "br=$WORK/ext=rw:$WORK/lower=ro" aufs "$WORK/union"
++grep -qx lower "$WORK/union/lower-file"
++printf 'changed\n' >"$WORK/union/lower-file"
++grep -qx changed "$WORK/ext/lower-file"
++grep -qx lower "$WORK/lower/lower-file"
++rm "$WORK/union/lower-file"
++[ ! -e "$WORK/union/lower-file" ]
++[ -e "$WORK/ext/.wh.lower-file" ]
++umount "$WORK/union"
++echo 'PASS: ext4 filesystem root is writable upper with copy-up and whiteout'
++mount --bind "$WORK/ext" "$WORK/alias"
++mount -t aufs -o "br=$WORK/alias=rw" aufs "$WORK/union"
++grep -qx ext4 "$WORK/union/ext4-file"
++umount "$WORK/union"
++umount "$WORK/alias"
++echo 'PASS: bind-mounted ext4 filesystem root'
++mount -t aufs -o "br=$WORK/upper=rw:$WORK/ext=ro" aufs "$WORK/union"
++grep -qx ext4 "$WORK/union/ext4-file"
++umount "$WORK/union"
++echo 'PASS: ext4 filesystem root as read-only lower'
++mount -t aufs -o "br=$WORK/upper=rw" aufs "$WORK/union"
++mount -t aufs -o "remount,add=1:$WORK/ext=ro" aufs "$WORK/union"
++grep -qx ext4 "$WORK/union/ext4-file"
++mount -t aufs -o "remount,del=$WORK/ext" aufs "$WORK/union"
++[ ! -e "$WORK/union/ext4-file" ]
++umount "$WORK/union"
++echo 'PASS: ext4 filesystem root dynamic add and remove'
++mkdir "$WORK/ext/sub"
++mount -t aufs -o "br=$WORK/ext/sub=rw" aufs "$WORK/union"
++printf 'subdir\n' >"$WORK/union/probe"
++umount "$WORK/union"
++grep -qx subdir "$WORK/ext/sub/probe"
++echo 'PASS: ext4 subdirectory behavior unchanged'
 +test_local_root ext2 mkfs.ext2 -F -q
 +if command -v mkfs.btrfs >/dev/null; then
 +    test_local_root btrfs mkfs.btrfs -f -q
 +else
 +    echo 'SKIP: mkfs.btrfs is unavailable'
 +fi
- truncate -s 128M "$WORK/fold.img"
- mkfs.ext4 -F -q -O casefold "$WORK/fold.img"
- mount -t ext4 -o loop "$WORK/fold.img" "$WORK/fold"
++truncate -s 128M "$WORK/fold.img"
++mkfs.ext4 -F -q -O casefold "$WORK/fold.img"
++mount -t ext4 -o loop "$WORK/fold.img" "$WORK/fold"
++if mount -t aufs -o "br=$WORK/fold=rw" aufs "$WORK/union"; then
++    echo 'FAIL: casefold root was unexpectedly accepted' >&2; exit 1
++fi
++echo 'PASS: casefold root remains rejected'
++mount -t aufs -o "br=$WORK/upper=rw" aufs "$WORK/union"
++if mount -t aufs -o "br=$WORK/union=rw" aufs "$WORK/nested"; then
++    echo 'FAIL: revalidating AUFS root was unexpectedly accepted' >&2; exit 1
++fi
++umount "$WORK/union"
++echo 'PASS: non-fscrypt revalidating AUFS root remains rejected'
++printf 'EXT4_ROOT_%s_OK\n' REGRESSIONS
